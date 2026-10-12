@@ -318,6 +318,75 @@
   @BeforeEach void setUp() { jdbc.update("DELETE FROM orders"); }   // 每个测试前清表
   测试代码本身（断言部分）几乎不用改 —— 这就是分层的好处。
 
+【6.7 分层测试：业务层 vs 接口层】
+
+  两层测试分工不同（本项目共 22 个测试）：
+
+      业务层（OrderServiceTest，8 个）
+          直接调用 Java 方法，测的是【逻辑对不对】
+          service.createOrder("A001", 100)
+          assertThrows(IllegalArgumentException.class, () -> ...)
+
+      接口层（OrderControllerTest，14 个）
+          用 MockMvc 模拟 HTTP 请求，测的是【HTTP 契约对不对】
+          状态码、JSON 字段名、错误格式、DTO 白名单
+
+  接口层测试需要的注解（比业务层多一个）：
+
+      @SpringBootTest
+      @AutoConfigureMockMvc               // 加这个才能注入 MockMvc
+      class OrderControllerTest {
+
+          @Autowired MockMvc mockMvc;     // 它能在不启动 Tomcat 的情况下"发 HTTP 请求"
+          @Autowired OrderService service;   // 用来准备数据
+          @Autowired JdbcTemplate jdbc;      // 用来清表
+
+  怎么发请求（固定套路，记住四个方法）：
+
+      mockMvc.perform(post("/orders")
+                      .contentType(MediaType.APPLICATION_JSON)
+                      .content("{\"id\":\"A001\",\"amount\":100}"))
+             .andExpect(status().isCreated())                    // 断言状态码
+             .andExpect(jsonPath("$.id").value("A001"))          // 断言 JSON 字段
+             .andExpect(jsonPath("$.error").value("订单号不能为空"));
+
+      get(...)  / post(...)                发请求
+      status().isOk() / isCreated() / isBadRequest() / isNotFound() / isConflict()
+      jsonPath("$.字段名").value(期望值)     断言 JSON 内容
+      jsonPath("$.length()").value(2)      断言数组长度
+      jsonPath("$[0].id")                  数组第 0 个元素的 id
+
+  ★ MockMvc 的好处：不用真的启动服务器、不用管端口，就能测完整的
+    "请求 -> 拦截 -> Controller -> Service -> 数据库 -> 响应"链路。
+
+【6.8 一个很值得写的接口层测试：DTO 白名单】
+
+  验证"客户端多传字段会被忽略"，这是防参数注入的证据：
+
+      @Test
+      void create_extraFieldsAreIgnored() throws Exception {
+          mockMvc.perform(post("/orders")
+                          .contentType(MediaType.APPLICATION_JSON)
+                          .content("{\"id\":\"A001\",\"amount\":100,\"status\":\"PAID\",\"seq\":9999}"))
+                 .andExpect(status().isCreated())
+                 .andExpect(jsonPath("$.status").value("UNPAID"));   // 没被篡改
+      }
+
+  如果接口用实体接收请求体，status 就会变成 PAID —— 等于绕过支付流程。
+  详见第十三节和 DTO 相关说明。
+
+【6.9 跑测试的常用命令】
+
+      mvn test                                跑全部
+      mvn clean test                          先清理再跑（改了构造方法/签名后建议用这个）
+      mvn test -Dtest=OrderControllerTest     只跑某一个测试类
+      mvn test -Dtest=OrderServiceTest#pay_concurrentOnlyOneSucceeds   只跑某一个方法
+
+  ★ 为什么建议改签名后用 clean test：
+    Maven 默认做【增量编译】，只重编"时间戳变了"的文件。
+    如果改了 A 的构造方法、但 B 的源文件没动，B 可能【跳过重编】，
+    于是编译错误被掩盖，直到某次全量编译才突然爆出来。
+
 
 ============================================================
 七、Spring Boot 与 Web 接口
@@ -843,6 +912,9 @@ Q10 什么是依赖注入？
   Step 7  Spring Boot           REST 接口、注解、依赖注入实战、Swagger UI
   Step 8  持久化                 H2 + JdbcTemplate，数据重启不丢
   Step 9  并发安全               原子条件更新（UPDATE ... WHERE 条件），20 线程压测验证
+  Step 10 DTO 分层               CreateOrderRequest / OrderResponse，防篡改与防泄露
+  Step 11 统一错误响应           所有错误统一为 {"error": "..."}（400/404/409）
+  Step 12 接口层测试             MockMvc 测状态码与 JSON 契约，测试总数 8 -> 22
 
 ============================================================
   笔记结束。卡住的时候先翻"常见坑清单"，再去"面试问答"自测。
