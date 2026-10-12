@@ -4,13 +4,15 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 /**
- * Web 版程序入口。
+ * 程序入口（唯一的入口）。
  *
- * 对比一下两个入口：
- *   - Main.java            ：控制台版，自己 new OrderService(new OrderRepository())
- *   - OrderAppApplication  ：Web 版，对象由 Spring 创建并自动组装（依赖注入）
+ * 这里只做一件事：启动 Spring Boot。
+ * 之后对象都由 Spring 创建并自动组装（依赖注入），而不是手动 new：
+ *   - @Service    -> 创建 OrderService，并把它需要的 OrderRepository 递进去
+ *   - @Repository -> 创建 OrderRepository，并把它需要的 JdbcTemplate 递进去
+ *   - @RestController -> 创建 OrderController，并把 OrderService 递进去
  *
- * 两边的 OrderService / OrderRepository 是同一份代码，一行都没改。
+ * 这套组装关系，无需在 main 里写任何 new。
  */
 @SpringBootApplication
 public class OrderAppApplication {

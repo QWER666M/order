@@ -10,7 +10,8 @@ import org.springframework.stereotype.Repository;
  * 数据层：只负责"订单怎么存、怎么取"。
  *
  * ★ 变化说明：以前用内存 Map，现在换成 H2 数据库（通过 JdbcTemplate 写 SQL）。
- *   关键的是 —— OrderService / OrderController / Main 全都不用改（除了 pay/cancel 要多一句写回），
+ *   关键的是 —— OrderService / OrderController / Order 全都不用改
+ *   （除了 pay/cancel 改成了原子条件更新），
  *   因为"数据存在哪"只有这一层知道。
  */
 @Repository

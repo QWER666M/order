@@ -19,9 +19,9 @@ import java.util.Map;
 /**
  * 接口层（Controller）：把 HTTP 请求翻译成对 OrderService 的调用。
  *
- * 它和 Main.java 是同一层的东西 —— 都是"入口"，
- * 区别只是：Main 从键盘读输入，Controller 从 HTTP 请求读。
- * 所以这里也【不做任何业务判断】，规则全在 OrderService。
+ * 它是整个服务对外的入口：
+ *   HTTP 请求进来 -> 这里负责解析 -> 交给 OrderService 处理业务
+ * 所以这里【不做任何业务判断】，规则全在 OrderService。
  *
  * 另一个约定：对外一律使用 dto 包里的 CreateOrderRequest / OrderResponse，
  * 不直接暴露 Order 实体 —— 实体是"内部模型"，DTO 才是"对外契约"。
