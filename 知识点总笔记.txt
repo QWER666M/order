@@ -805,6 +805,8 @@ Q10 什么是依赖注入？
   Step 4  OrderService.java     业务规则、throw vs return false、依赖注入
   Step 5  Main.java             界面层、Scanner、try/catch
           (额外) 自己加 "6 查询订单" 命令
+          ★ 后续：项目转为 Web 服务后，控制台入口 Main.java / run.ps1 已删除
+            （原因：OrderRepository 需要注入 JdbcTemplate，无法再手动 new）
   Step 6  Maven + JUnit         标准工程结构、6 个单元测试
   Step 7  Spring Boot           REST 接口、注解、依赖注入实战、Swagger UI
   Step 8  持久化                 H2 + JdbcTemplate，数据重启不丢
