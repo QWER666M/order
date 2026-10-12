@@ -8,7 +8,7 @@
 ## 功能特性
 
 - **创建订单**：自动校验订单号非空、不重复，金额必须大于 0
-- **查询订单**：支持按订单号查询单笔、查询全部订单
+- **查询订单**：支持按订单号查询单笔、分页查询订单列表
 - **支付订单**：仅允许「待支付」状态的订单支付
 - **取消订单**：仅允许「待支付」状态的订单取消
 - **金额统计**：按订单状态汇总总金额
@@ -118,7 +118,7 @@ H2 控制台登录信息：
 
 | 方法 | 路径 | 说明 | 成功 | 失败 |
 |---|---|---|---|---|
-| GET | `/orders` | 查询全部订单 | 200 | — |
+| GET | `/orders?page=1&size=10` | 分页查询订单列表 | 200 | 400 参数不合法 |
 | POST | `/orders` | 创建订单 | 201 | 400 参数不合法 |
 | GET | `/orders/{id}` | 按订单号查询 | 200 | 404 订单不存在 |
 | POST | `/orders/{id}/pay` | 支付订单 | 200 | 409 状态冲突 |
@@ -153,6 +153,33 @@ curl -X POST http://localhost:8080/orders \
 }
 ```
 
+### 分页查询
+
+```bash
+curl "http://localhost:8080/orders?page=1&size=10"
+```
+
+| 参数 | 默认值 | 取值范围 | 说明 |
+|---|---|---|---|
+| `page` | 1 | ≥ 1 | 页码，**从 1 开始** |
+| `size` | 10 | 1 ~ 100 | 每页条数（设上限防止一次拉走全表） |
+
+响应：
+
+```json
+{
+  "items": [
+    { "id": "A001", "amount": 100.00, "status": "UNPAID" }
+  ],
+  "total": 25,
+  "page": 1,
+  "size": 10,
+  "totalPages": 3
+}
+```
+
+分页由数据库完成（SQL `LIMIT ? OFFSET ?`），**不会把全表读进内存**。
+
 ### 错误响应
 
 所有错误响应使用**统一格式**，客户端只需处理一种结构：
@@ -168,6 +195,8 @@ curl -X POST http://localhost:8080/orders \
 | 订单号为空 | 400 | `{"error": "订单号不能为空"}` |
 | 金额 ≤ 0 | 400 | `{"error": "金额必须大于 0"}` |
 | 金额超过两位小数 | 400 | `{"error": "金额最多支持两位小数"}` |
+| 页码小于 1 | 400 | `{"error": "页码必须大于等于 1"}` |
+| 每页条数超出 1~100 | 400 | `{"error": "每页条数必须在 1 ~ 100 之间"}` |
 | 订单号重复 | 400 | `{"error": "订单号已存在：A001"}` |
 | 订单不存在 | 404 | `{"error": "订单不存在：A001"}` |
 | 状态冲突（重复支付/取消已支付订单） | 409 | `{"error": "支付失败：订单不存在或不是待支付状态"}` |
@@ -230,7 +259,8 @@ order-app/
     │   │   ├── ApiExceptionHandler.java     全局异常处理
     │   │   └── dto/
     │   │       ├── CreateOrderRequest.java   入参 DTO
-    │   │       └── OrderResponse.java        出参 DTO
+    │   │       ├── OrderResponse.java        出参 DTO
+    │   │       └── PageResponse.java         通用分页结构
     │   └── resources/
     │       ├── application.properties       数据库与应用配置
     │       └── schema.sql                   建表脚本
@@ -260,9 +290,9 @@ CREATE TABLE orders (
 
 ## 测试
 
-共 **26 个测试**，分为两层：
+共 **32 个测试**，分为两层：
 
-### 业务层测试 `OrderServiceTest`（12 个）
+### 业务层测试 `OrderServiceTest`（14 个）
 
 直接调用 `OrderService` 的 Java 方法，验证业务规则与并发安全：
 
@@ -277,11 +307,13 @@ CREATE TABLE orders (
 | `pay_unpaidOrder_success` | 支付待支付订单成功，状态变更为已支付 |
 | `pay_orderNotFound_returnsFalse` | 支付不存在的订单返回 false |
 | `sumAmount_sumsByStatus` | 按状态汇总金额，小数加法精确（10.10 + 0.70 = 10.80） |
+| `listOrders_pagination` | 分页正确：页码偏移、总数、总页数、超范围返回空页 |
+| `listOrders_invalidPagingParams_throws` | 页码 < 1 或每页条数越界时抛出异常 |
 | `pay_concurrentOnlyOneSucceeds` | 20 线程并发支付同一订单，**仅 1 个成功** |
 | `cancel_concurrentOnlyOneSucceeds` | 20 线程并发取消同一订单，**仅 1 个成功** |
 | `createOrder_concurrentSameId_onlyOneSucceeds` | 20 线程并发创建同一订单号，**仅 1 个成功，其余为友好业务错误（不产生 500）** |
 
-### 接口层测试 `OrderControllerTest`（14 个）
+### 接口层测试 `OrderControllerTest`（18 个）
 
 使用 `MockMvc` 模拟 HTTP 请求，验证**状态码、JSON 字段名、错误格式与 DTO 白名单**：
 
@@ -294,7 +326,11 @@ CREATE TABLE orders (
 | `create_extraFieldsAreIgnored` | **客户端多传 `status` 被忽略**，不会绕过支付流程 |
 | `getOne_found_returns200` | 查询存在的订单返回 200 |
 | `getOne_notFound_returns404WithUnifiedError` | 查询不存在返回 404 与 `{"error": ...}` |
-| `list_returnsArray` / `list_empty_returnsEmptyArray` | 列表接口返回数组，且按插入顺序 |
+| `list_returnsPageWithMetadata` | 列表返回分页结构（items / total / page / size / totalPages），且按插入顺序 |
+| `list_empty_returnsEmptyPage` | 空表返回空页 |
+| `list_secondPage_returnsRemainingItems` | 第 2 页返回剩余数据（验证分页偏移正确） |
+| `list_pageLessThanOne_returns400` / `list_sizeTooLarge_returns400` | 分页参数越界返回 400 |
+| `list_sizeNotANumber_returns400` | 非数字参数由框架拦截，同样返回统一错误格式 |
 | `pay_success_returns200` | 支付成功返回 200 |
 | `pay_alreadyPaid_returns409` / `pay_orderNotFound_returns409` | 状态冲突返回 409 |
 | `cancel_success_returns200` | 取消成功返回 200 |
@@ -323,6 +359,11 @@ mvn test -Dtest=OrderServiceTest#pay_concurrentOnlyOneSucceeds   # 只跑某一�
 - **依赖注入**：`OrderService` 与 `OrderRepository` 的依赖均由 Spring 容器注入，而非自行创建，
   从而实现层与层之间的解耦，并便于在测试中替换依赖
 - **不可变设计**：订单号与金额使用 `final` 修饰，创建后不可修改；订单号作为数据主键，不可变性尤为重要
+- **分页查询**：列表接口支持 `page` / `size` 参数，由数据库执行 `LIMIT ? OFFSET ?`，
+  只取需要的那一页，避免把全表读进内存。分页参数在业务层校验（页码 ≥ 1、每页 1~100），
+  并对 `size` 设上限，防止客户端用超大 size 变相拉走全表。
+  返回结构为通用的 `PageResponse<T>`（items / total / page / size / totalPages），
+  并通过 `map()` 把业务对象整体转换为对外 DTO
 - **金额使用 `BigDecimal`**：货币不能用 `int`（存不了小数）或 `double`（二进制浮点无法精确表示十进制小数，
   `0.1 + 0.2` 会得到 `0.30000000000000004`）。数据库列使用 `DECIMAL(12,2)`，Java 侧全程 `BigDecimal`，
   并在创建时统一归一为两位小数（`setScale(2)`），保证存储与接口返回的金额格式一致。

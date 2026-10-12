@@ -3,6 +3,8 @@ package com.example.order;
 import java.math.BigDecimal;
 import java.util.List;
 
+import com.example.order.dto.PageResponse;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
@@ -22,6 +24,9 @@ import org.springframework.stereotype.Service;
 public class OrderService {
 
     private static final Logger log = LoggerFactory.getLogger(OrderService.class);
+
+    /** 每页最多允许取多少条（防止客户端一次拉走全表） */
+    private static final int MAX_PAGE_SIZE = 100;
 
     private final OrderRepository repository;
 
@@ -66,8 +71,26 @@ public class OrderService {
         return repository.get(id);
     }
 
-    public List<Order> listOrders() {
-        return repository.listAll();
+    /**
+     * 分页查询订单（page 从 1 开始）。
+     *
+     * 分页参数属于"业务约束"，所以校验放在业务层 —— 不论从哪个入口进来都受约束：
+     *   - page 至少为 1
+     *   - size 至少为 1，且不能超过上限（防止客户端用 size=999999 一次拉走全表，
+     *     那等于没分页，还可能把内存撑爆）
+     */
+    public PageResponse<Order> listOrders(int page, int size) {
+        if (page < 1) {
+            throw new IllegalArgumentException("页码必须大于等于 1");
+        }
+        if (size < 1 || size > MAX_PAGE_SIZE) {
+            throw new IllegalArgumentException("每页条数必须在 1 ~ " + MAX_PAGE_SIZE + " 之间");
+        }
+
+        int offset = (page - 1) * size;          // 第 1 页从第 0 条开始；第 2 页跳过 size 条
+        List<Order> items = repository.listPage(offset, size);
+        long total = repository.count();
+        return new PageResponse<>(items, total, page, size);
     }
 
     /**

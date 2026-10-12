@@ -2,6 +2,7 @@ package com.example.order;
 
 import com.example.order.dto.CreateOrderRequest;
 import com.example.order.dto.OrderResponse;
+import com.example.order.dto.PageResponse;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -9,12 +10,12 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -38,13 +39,13 @@ public class OrderController {
         this.service = service;
     }
 
-    /** GET /orders —— 查看全部订单 */
+    /** GET /orders —— 分页查看订单，支持 ?page=1&size=10（都有默认值） */
     @GetMapping
-    public List<OrderResponse> list() {
-        // stream：把每个 Order 逐个转成 OrderResponse，.toList() 收集成新的 List
-        return service.listOrders().stream()
-                .map(OrderResponse::from)
-                .toList();
+    public PageResponse<OrderResponse> list(
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "10") int size) {
+        // 先拿到"业务对象的一页"，再整体映射成"对外的一页"（PageResponse.map）
+        return service.listOrders(page, size).map(OrderResponse::from);
     }
 
     /** POST /orders —— 创建订单，请求体形如 {"id":"A001","amount":100.00} */

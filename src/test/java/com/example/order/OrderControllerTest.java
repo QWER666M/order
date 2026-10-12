@@ -123,24 +123,69 @@ class OrderControllerTest {
                 .andExpect(jsonPath("$.error").value("订单不存在：NOT-EXIST"));   // 统一错误格式
     }
 
-    // ================= 查询全部 GET /orders =================
+    // ================= 分页查询 GET /orders?page=&size= =================
 
     @Test
-    void list_returnsArray() throws Exception {
+    void list_returnsPageWithMetadata() throws Exception {
         service.createOrder("A001", money("100"));
         service.createOrder("A002", money("200"));
 
         mockMvc.perform(get("/orders"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.length()").value(2))
-                .andExpect(jsonPath("$[0].id").value("A001"));   // 按插入顺序
+                .andExpect(jsonPath("$.items.length()").value(2))
+                .andExpect(jsonPath("$.items[0].id").value("A001"))   // 按插入顺序
+                .andExpect(jsonPath("$.total").value(2))
+                .andExpect(jsonPath("$.page").value(1))
+                .andExpect(jsonPath("$.size").value(10))              // 默认每页 10 条
+                .andExpect(jsonPath("$.totalPages").value(1));
     }
 
     @Test
-    void list_empty_returnsEmptyArray() throws Exception {
+    void list_empty_returnsEmptyPage() throws Exception {
         mockMvc.perform(get("/orders"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.length()").value(0));
+                .andExpect(jsonPath("$.items.length()").value(0))
+                .andExpect(jsonPath("$.total").value(0))
+                .andExpect(jsonPath("$.totalPages").value(0));
+    }
+
+    /** 分页真的分开了：3 条数据、每页 2 条，第 2 页只应返回 1 条。 */
+    @Test
+    void list_secondPage_returnsRemainingItems() throws Exception {
+        service.createOrder("A001", money("100"));
+        service.createOrder("A002", money("200"));
+        service.createOrder("A003", money("300"));
+
+        mockMvc.perform(get("/orders").param("page", "2").param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].id").value("A003"))   // 第 2 页只剩 A003
+                .andExpect(jsonPath("$.total").value(3))
+                .andExpect(jsonPath("$.page").value(2))
+                .andExpect(jsonPath("$.size").value(2))
+                .andExpect(jsonPath("$.totalPages").value(2));        // 3 条 / 每页 2 条 = 2 页
+    }
+
+    @Test
+    void list_pageLessThanOne_returns400() throws Exception {
+        mockMvc.perform(get("/orders").param("page", "0"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("页码必须大于等于 1"));
+    }
+
+    /** 防止客户端用超大 size 一次拉走全表（那等于没分页，还可能撑爆内存）。 */
+    @Test
+    void list_sizeTooLarge_returns400() throws Exception {
+        mockMvc.perform(get("/orders").param("size", "1000"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("每页条数必须在 1 ~ 100 之间"));
+    }
+
+    @Test
+    void list_sizeNotANumber_returns400() throws Exception {
+        mockMvc.perform(get("/orders").param("size", "abc"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").exists());   // 框架的参数类型转换失败，走统一错误格式
     }
 
     // ================= 支付 POST /orders/{id}/pay =================

@@ -2,6 +2,8 @@ package com.example.order;
 
 import java.math.BigDecimal;
 import java.util.concurrent.CountDownLatch;
+
+import com.example.order.dto.PageResponse;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -143,6 +145,49 @@ class OrderServiceTest {
 
         assertAmount("20.20", service.sumAmount(OrderStatus.PAID));
         assertAmount("10.80", service.sumAmount(OrderStatus.UNPAID));   // 10.10 + 0.70
+    }
+
+    // ================= 分页 =================
+
+    /**
+     * 分页最容易犯"差一错误"（off-by-one）：页数怎么算、第 2 页该从哪里开始，
+     * 用具体数据把它钉死，以后改代码就能立刻发现有没有弄坏。
+     */
+    @Test
+    void listOrders_pagination() {
+        service.createOrder("A001", money("100"));
+        service.createOrder("A002", money("100"));
+        service.createOrder("A003", money("100"));
+
+        // 第 1 页：前两条
+        PageResponse<Order> page1 = service.listOrders(1, 2);
+        assertEquals(2, page1.items().size());
+        assertEquals("A001", page1.items().get(0).getId());
+        assertEquals("A002", page1.items().get(1).getId());
+        assertEquals(3, page1.total());
+        assertEquals(2, page1.getTotalPages());          // 3 条 / 每页 2 条 = 2 页
+
+        // 第 2 页：跳过前 2 条，从 A003 开始（最易写错的地方）
+        PageResponse<Order> page2 = service.listOrders(2, 2);
+        assertEquals(1, page2.items().size());
+        assertEquals("A003", page2.items().get(0).getId());
+        assertEquals(3, page2.total());
+
+        // 页码超出范围：返回空页，而不是报错
+        PageResponse<Order> far = service.listOrders(99, 2);
+        assertTrue(far.items().isEmpty());
+        assertEquals(3, far.total());
+    }
+
+    @Test
+    void listOrders_invalidPagingParams_throws() {
+        IllegalArgumentException e1 = assertThrows(IllegalArgumentException.class,
+                () -> service.listOrders(0, 10));
+        assertEquals("页码必须大于等于 1", e1.getMessage());
+
+        IllegalArgumentException e2 = assertThrows(IllegalArgumentException.class,
+                () -> service.listOrders(1, 101));
+        assertEquals("每页条数必须在 1 ~ 100 之间", e2.getMessage());
     }
 
     // ================= 并发安全测试 =================

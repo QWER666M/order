@@ -66,16 +66,29 @@ public class OrderRepository {
         return jdbc.query("SELECT id, amount, status FROM orders ORDER BY seq", TO_ORDER);
     }
 
+    /**
+     * 分页查询：跳过 offset 条，取 limit 条。
+     *
+     * SQL 里的 LIMIT / OFFSET 由数据库完成"只取一部分"，不会把全表读进内存，
+     * 这正是分页能省内存的关键 —— 不是查出来再截取。
+     * （H2 与 MySQL、PostgreSQL 都支持 LIMIT ? OFFSET ? 这种写法。）
+     */
+    public List<Order> listPage(int offset, int limit) {
+        return jdbc.query(
+                "SELECT id, amount, status FROM orders ORDER BY seq LIMIT ? OFFSET ?",
+                TO_ORDER, limit, offset);
+    }
+
+    /** 一共多少笔（用 long：记录数可能超过 int 上限） */
+    public long count() {
+        Long total = jdbc.queryForObject("SELECT COUNT(*) FROM orders", Long.class);
+        return total == null ? 0L : total;
+    }
+
     /** 订单号是否已存在 */
     public boolean contains(String id) {
         Integer count = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM orders WHERE id = ?", Integer.class, id);
         return count != null && count > 0;
-    }
-
-    /** 一共多少笔 */
-    public int size() {
-        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM orders", Integer.class);
-        return count == null ? 0 : count;
     }
 }
