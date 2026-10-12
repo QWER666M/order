@@ -1,5 +1,7 @@
 # 订单管理系统（Order Management System）
 
+![CI](https://github.com/QWER666M/order/actions/workflows/ci.yml/badge.svg)
+
 一个基于 Spring Boot 的订单管理后端服务，提供订单的创建、查询、支付、取消与统计能力，
 使用分层架构设计，并通过单元测试保证业务规则的正确性。
 
@@ -88,6 +90,13 @@ mvn spring-boot:run
 
 ```bash
 mvn test
+```
+
+### 构建可执行 JAR
+
+```bash
+mvn clean verify
+java -jar target/order-app-1.0.0.jar
 ```
 
 ### 访问入口
@@ -207,6 +216,7 @@ order-app/
 ├── pom.xml                                  Maven 配置
 ├── README.md
 ├── .gitignore
+├── .github/workflows/ci.yml                 CI：自动构建与测试
 └── src/
     ├── main/
     │   ├── java/com/example/order/
@@ -296,6 +306,13 @@ mvn test                                    # 跑全部测试
 mvn test -Dtest=OrderControllerTest         # 只跑接口层测试
 mvn test -Dtest=OrderServiceTest#pay_concurrentOnlyOneSucceeds   # 只跑某一个测试
 ```
+
+## 持续集成
+
+仓库配置了 GitHub Actions（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）：
+每次推送到 `main` 或提交 Pull Request 时，会自动在 JDK 21 环境中执行
+`mvn -B clean verify`（编译 → 全部测试 → 打包），确保进入主分支的代码始终可构建、测试通过。
+构建状态见页面顶部的 CI 徽章。
 
 ## 技术实现要点
 

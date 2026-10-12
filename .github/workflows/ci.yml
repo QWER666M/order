@@ -1,0 +1,35 @@
+name: CI
+
+# 什么时候触发：
+#   push 到 main 分支时
+#   以及任何 Pull Request（这样别人提 PR 时会先自动验证）
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build:
+    name: 构建与测试
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. 把仓库代码拉到 CI 机器上
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 2. 安装 JDK 21（与 pom.xml 里的 java.version 保持一致）
+      #    cache: maven 会缓存本地仓库，后续构建快很多
+      - name: 安装 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      # 3. 构建 + 跑全部测试
+      #    clean  ：清掉上次的产物，做全新构建
+      #    verify ：编译 -> 测试 -> 打包，并校验打包结果
+      #    -B     ：批处理模式，日志更干净（适合 CI）
+      - name: 构建并运行测试
+        run: mvn -B clean verify
