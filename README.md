@@ -218,7 +218,8 @@ order-app/
     │       └── schema.sql                   建表脚本
     └── test/
         ├── java/com/example/order/
-        │   └── OrderServiceTest.java        单元测试
+        │   ├── OrderServiceTest.java        业务层测试（含并发测试）
+        │   └── OrderControllerTest.java     接口层测试（MockMvc）
         └── resources/
             └── application.properties       测试专用配置（内存数据库）
 ```
@@ -241,7 +242,11 @@ CREATE TABLE orders (
 
 ## 测试
 
-共 8 个单元测试，覆盖全部业务规则与并发场景：
+共 **22 个测试**，分为两层：
+
+### 业务层测试 `OrderServiceTest`（8 个）
+
+直接调用 `OrderService` 的 Java 方法，验证业务规则与并发安全：
 
 | 测试 | 验证内容 |
 |---|---|
@@ -254,8 +259,35 @@ CREATE TABLE orders (
 | `pay_concurrentOnlyOneSucceeds` | 20 线程并发支付同一订单，**仅 1 个成功** |
 | `cancel_concurrentOnlyOneSucceeds` | 20 线程并发取消同一订单，**仅 1 个成功** |
 
+### 接口层测试 `OrderControllerTest`（14 个）
+
+使用 `MockMvc` 模拟 HTTP 请求，验证**状态码、JSON 字段名、错误格式与 DTO 白名单**：
+
+| 测试 | 验证内容 |
+|---|---|
+| `create_returns201AndBody` | 创建成功返回 201 与正确的 JSON 字段 |
+| `create_idBlank_returns400` | 订单号为空返回 400 与统一错误格式 |
+| `create_amountNotPositive_returns400` | 金额 ≤ 0 返回 400 |
+| `create_idDuplicate_returns400` | 订单号重复返回 400 |
+| `create_extraFieldsAreIgnored` | **客户端多传 `status` 被忽略**，不会绕过支付流程 |
+| `getOne_found_returns200` | 查询存在的订单返回 200 |
+| `getOne_notFound_returns404WithUnifiedError` | 查询不存在返回 404 与 `{"error": ...}` |
+| `list_returnsArray` / `list_empty_returnsEmptyArray` | 列表接口返回数组，且按插入顺序 |
+| `pay_success_returns200` | 支付成功返回 200 |
+| `pay_alreadyPaid_returns409` / `pay_orderNotFound_returns409` | 状态冲突返回 409 |
+| `cancel_success_returns200` | 取消成功返回 200 |
+| `stats_returnsTotalsByStatus` | 统计接口返回各状态金额 |
+
+两层测试的分工：**业务层测"逻辑对不对"，接口层测"HTTP 契约对不对"**。
+
 测试使用 H2 **内存数据库**（`jdbc:h2:mem:testdb`），并在每个测试方法前清空数据表，
 以保证测试之间相互独立、且不污染开发数据。
+
+```bash
+mvn test                                    # 跑全部测试
+mvn test -Dtest=OrderControllerTest         # 只跑接口层测试
+mvn test -Dtest=OrderServiceTest#pay_concurrentOnlyOneSucceeds   # 只跑某一个测试
+```
 
 ## 技术实现要点
 
