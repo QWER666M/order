@@ -274,6 +274,45 @@
   ★ 编译器不报错 != 代码写对了（编译器只认语法，不认你的意图）
 
 
+【5.6 持续集成（CI）：让"每次提交都自动验证"】
+
+  问题：本地跑通不代表别人拉下来也能跑通；也防不住"改坏了没发现就提交"。
+
+  做法：在仓库里放一个 .github/workflows/ci.yml，GitHub 就会在指定时机自动跑：
+
+      name: CI
+      on:
+        push:
+          branches: [ main ]
+        pull_request:
+      jobs:
+        build:
+          runs-on: ubuntu-latest
+          steps:
+            - uses: actions/checkout@v4                      # 拉代码
+            - uses: actions/setup-java@v4                    # 装 JDK
+              with:
+                java-version: '21'
+                distribution: 'temurin'
+                cache: maven                                 # 缓存依赖，加速
+            - run: mvn -B clean verify                       # 编译 + 测试 + 打包
+
+  几个要点：
+    - on: 是触发时机（push / pull_request / schedule...）
+    - setup-java 的 java-version 要和 pom.xml 的 java.version 一致
+    - cache: maven 会缓存 ~/.m2，第二次起构建快很多
+    - mvn -B clean verify：clean 保证全新构建，verify 会跑完测试并打包
+    - -B 是批处理模式，日志更干净（适合 CI）
+
+  ★ 简历小技巧：README 顶部加一个状态徽章，一眼就能看到"测试是通过的"：
+
+      ![CI](https://github.com/<用户名>/<仓库>/actions/workflows/ci.yml/badge.svg)
+
+  ★ 关键认知：CI 的价值不只是"自动跑测试"，而是
+    【把"能不能构建、测试过不过"变成对所有人可见的事实】——
+    别人（包括面试官）点开仓库就能看到绿标。
+
+
 ============================================================
 六、单元测试（JUnit 5）
 ============================================================
@@ -475,6 +514,48 @@
     /swagger-ui.html     人类看的图形界面
     /v3/api-docs         机器看的 JSON（Postman 能一键导入）
   用法：展开接口 -> Try it out -> 填参数/请求体 -> Execute -> 看 Server response
+
+
+【7.11 日志（SLF4J）：怎么让程序"会说话"】
+
+  为什么需要日志？
+    出问题时（用户说"我支付失败了"），你要能回答：
+      什么时候、哪个请求、发生了什么、为什么失败。
+    光靠 System.out.println 不行（没有级别、没有时间、没法按包开关、生产环境不该往控制台打）。
+
+  Spring Boot 内置 SLF4J + Logback，直接用：
+
+      private static final Logger log = LoggerFactory.getLogger(OrderService.class);
+      // import org.slf4j.Logger;
+      // import org.slf4j.LoggerFactory;
+
+      log.info("创建订单成功: id={}, amount={}", id, amount);
+      log.warn("创建订单时发生订单号冲突（并发）: id={}", id);
+      log.error("未预期的异常", e);        // 注意：异常对象作为【最后一个参数】，会自动打全栈
+
+  五个级别（从低到高）：trace < debug < info < warn < error
+    默认显示 info 及以上。
+
+  ★ 用 {} 占位符，不要字符串拼接：
+      log.info("id=" + id);            // ❌ 没开 info 级别也白拼了字符串
+      log.info("id={}", id);           // ✅ 级别不够就不拼，零开销
+
+  日志级别的选择（约定）：
+      info  —— 状态变更成功（创建/支付/取消成功），能还原"谁做了什么"
+      warn  —— 可预期的失败（订单不存在、状态冲突），需要追溯但不报警
+      error —— 未预期异常（代码 bug、环境问题），必须打完整堆栈
+
+  ★ 两句话原则（很重要）：
+      日志里说全话 —— log.error("未预期的异常", e)  打全栈，方便排查
+      响应里说最少话 —— {"error":"服务器内部错误"}   不暴露堆栈/SQL/类名
+
+  怎么按包调级别（application.properties）：
+      logging.level.com.example.order=INFO
+      logging.level.org.springframework.jdbc.core=DEBUG   # 想看每条 SQL 和参数时打开
+
+  ★ 面试话术："我的日志分了级别——状态变更记 info 便于追溯，业务失败记 warn，
+    未预期异常在全局处理器里记 error 并打全栈，同时对外只返回一句通用提示，
+    避免泄露内部实现。"
 
 
 ============================================================
@@ -1018,6 +1099,7 @@ Q10 什么是依赖注入？
   Step 12 接口层测试             MockMvc 测状态码与 JSON 契约，测试总数 8 -> 22
   Step 13 修复两个遗留缺陷        并发创建竞态（19/20 变 500 -> 统一 400）；
                                 全局异常兜底，8 条错误路径格式统一
+  Step 14 日志与 CI               SLF4J 分级日志；GitHub Actions 自动构建与测试
 
 ============================================================
   笔记结束。卡住的时候先翻"常见坑清单"，再去"面试问答"自测。
