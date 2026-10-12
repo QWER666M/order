@@ -508,6 +508,38 @@
     404 = 你要的东西不存在
     409 = 东西在，但现在这个状态不允许你这么干
 
+【9.1 统一错误响应格式（重要）】
+
+  所有错误响应都统一成一种结构：
+
+      {"error": "错误原因"}
+
+  为什么必须统一？
+    - 客户端只需处理一种结构，代码简单
+    - 避免落到 Spring 的默认错误页，它返回的是：
+        {"timestamp":"2026-...","status":404,"error":"Not Found","path":"/orders/xxx"}
+      两个问题：① 格式和业务错误不一致，客户端要写两套解析
+                ② 泄露 timestamp / path 等内部信息
+
+  实现（ApiExceptionHandler，@RestControllerAdvice）：
+    - @ExceptionHandler(IllegalArgumentException.class)      -> 400
+    - @ExceptionHandler(ResponseStatusException.class)       -> 沿用异常自带的状态码（404/409）
+
+  坑：Map.of(...) 的值【不允许为 null】。
+      异常 e.getMessage() 和 e.getReason() 都可能为 null，
+      直接放进去会抛 NPE —— 要写兜底文案：
+
+          String text = (message == null || message.isBlank()) ? fallback : message;
+
+【9.2 状态码该由谁决定】
+
+  经验法则：
+    - 400 由【业务校验失败】触发（Service 抛 IllegalArgumentException，
+      全局处理器统一转成 400）
+    - 404/409 由【接口层根据业务返回的 false/null】决定
+      （Service 返回 false 表示"正常业务结果"，接口层翻译成 409）
+    - Service 层【不认识 HTTP】，所以它不返回状态码，只抛异常/返回布尔
+
 
 ============================================================
 十、命令速查表
