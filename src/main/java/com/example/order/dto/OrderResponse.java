@@ -1,5 +1,7 @@
 package com.example.order.dto;
 
+import java.math.BigDecimal;
+
 import com.example.order.Order;
 import com.example.order.OrderStatus;
 
@@ -15,7 +17,7 @@ import com.example.order.OrderStatus;
  * 说明：当前 DTO 字段与实体恰好一致，是因为 Order 目前没有需要隐藏的字段；
  *       真正的价值在于【把"对外契约"和"内部模型"分离开】，为后续演化留出空间。
  */
-public record OrderResponse(String id, int amount, OrderStatus status) {
+public record OrderResponse(String id, BigDecimal amount, OrderStatus status) {
 
     /** 实体 -> DTO。转换集中在这里，调用方不需要知道字段怎么对应。 */
     public static OrderResponse from(Order order) {

@@ -132,7 +132,7 @@ H2 控制台登录信息：
 ```bash
 curl -X POST http://localhost:8080/orders \
      -H "Content-Type: application/json" \
-     -d '{"id":"A001","amount":100}'
+     -d '{"id":"A001","amount":100.00}'
 ```
 
 响应：
@@ -140,7 +140,7 @@ curl -X POST http://localhost:8080/orders \
 ```json
 {
   "id": "A001",
-  "amount": 100,
+  "amount": 100.00,
   "status": "UNPAID"
 }
 ```
@@ -167,6 +167,7 @@ curl -X POST http://localhost:8080/orders \
 |---|---|---|
 | 订单号为空 | 400 | `{"error": "订单号不能为空"}` |
 | 金额 ≤ 0 | 400 | `{"error": "金额必须大于 0"}` |
+| 金额超过两位小数 | 400 | `{"error": "金额最多支持两位小数"}` |
 | 订单号重复 | 400 | `{"error": "订单号已存在：A001"}` |
 | 订单不存在 | 404 | `{"error": "订单不存在：A001"}` |
 | 状态冲突（重复支付/取消已支付订单） | 409 | `{"error": "支付失败：订单不存在或不是待支付状态"}` |
@@ -193,9 +194,9 @@ curl http://localhost:8080/orders/stats
 
 ```json
 {
-  "unpaid": 200,
-  "paid": 100,
-  "cancelled": 0
+  "unpaid": 200.00,
+  "paid": 100.00,
+  "cancelled": 0.00
 }
 ```
 
@@ -247,7 +248,7 @@ order-app/
 CREATE TABLE orders (
     seq    BIGINT AUTO_INCREMENT PRIMARY KEY,  -- 自增序号，保证查询顺序
     id     VARCHAR(64) NOT NULL UNIQUE,        -- 订单号
-    amount INT         NOT NULL,               -- 金额
+    amount DECIMAL(12,2) NOT NULL,              -- 金额：DECIMAL(总位数, 小数位数)，精确十进制
     status VARCHAR(16) NOT NULL                -- 状态
 );
 ```
@@ -259,20 +260,23 @@ CREATE TABLE orders (
 
 ## 测试
 
-共 **23 个测试**，分为两层：
+共 **26 个测试**，分为两层：
 
-### 业务层测试 `OrderServiceTest`（9 个）
+### 业务层测试 `OrderServiceTest`（12 个）
 
 直接调用 `OrderService` 的 Java 方法，验证业务规则与并发安全：
 
 | 测试 | 验证内容 |
 |---|---|
 | `createOrder_success` | 正常创建订单，字段与初始状态正确 |
+| `createOrder_decimalAmount_success` | 小数金额（99.5）创建成功，精度归一为两位小数（99.50） |
 | `createOrder_amountNotPositive_throws` | 金额 ≤ 0 时抛出异常 |
+| `createOrder_amountTooManyDecimals_throws` | 金额超过两位小数时抛出异常 |
 | `createOrder_idDuplicate_throws` | 订单号重复时抛出异常 |
 | `createOrder_idEmpty_throws` | 订单号为空时抛出异常 |
 | `pay_unpaidOrder_success` | 支付待支付订单成功，状态变更为已支付 |
 | `pay_orderNotFound_returnsFalse` | 支付不存在的订单返回 false |
+| `sumAmount_sumsByStatus` | 按状态汇总金额，小数加法精确（10.10 + 0.70 = 10.80） |
 | `pay_concurrentOnlyOneSucceeds` | 20 线程并发支付同一订单，**仅 1 个成功** |
 | `cancel_concurrentOnlyOneSucceeds` | 20 线程并发取消同一订单，**仅 1 个成功** |
 | `createOrder_concurrentSameId_onlyOneSucceeds` | 20 线程并发创建同一订单号，**仅 1 个成功，其余为友好业务错误（不产生 500）** |
@@ -319,6 +323,10 @@ mvn test -Dtest=OrderServiceTest#pay_concurrentOnlyOneSucceeds   # 只跑某一�
 - **依赖注入**：`OrderService` 与 `OrderRepository` 的依赖均由 Spring 容器注入，而非自行创建，
   从而实现层与层之间的解耦，并便于在测试中替换依赖
 - **不可变设计**：订单号与金额使用 `final` 修饰，创建后不可修改；订单号作为数据主键，不可变性尤为重要
+- **金额使用 `BigDecimal`**：货币不能用 `int`（存不了小数）或 `double`（二进制浮点无法精确表示十进制小数，
+  `0.1 + 0.2` 会得到 `0.30000000000000004`）。数据库列使用 `DECIMAL(12,2)`，Java 侧全程 `BigDecimal`，
+  并在创建时统一归一为两位小数（`setScale(2)`），保证存储与接口返回的金额格式一致。
+  注意 `BigDecimal` 不可变，`add` 会返回新对象，必须接收返回值
 - **SQL 注入防护**：全部 SQL 使用 `?` 占位符传参，不进行字符串拼接
 - **异常语义化**：参数非法抛 `IllegalArgumentException`（由全局处理器转为 HTTP 400），
   业务结果失败返回 `false`（由接口层转为对应的状态码），二者语义区分明确

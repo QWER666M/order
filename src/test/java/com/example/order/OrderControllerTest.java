@@ -1,5 +1,7 @@
 package com.example.order;
 
+import java.math.BigDecimal;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -41,6 +43,11 @@ class OrderControllerTest {
         jdbc.update("DELETE FROM orders");
     }
 
+    /** 简写，让测试里的金额更像钱：money("100") */
+    private static BigDecimal money(String value) {
+        return new BigDecimal(value);
+    }
+
     // ================= 创建订单 POST /orders =================
 
     @Test
@@ -50,7 +57,7 @@ class OrderControllerTest {
                         .content("{\"id\":\"A001\",\"amount\":100}"))
                 .andExpect(status().isCreated())               // 201
                 .andExpect(jsonPath("$.id").value("A001"))
-                .andExpect(jsonPath("$.amount").value(100))
+                .andExpect(jsonPath("$.amount").value(100.00))
                 .andExpect(jsonPath("$.status").value("UNPAID"));
     }
 
@@ -74,7 +81,7 @@ class OrderControllerTest {
 
     @Test
     void create_idDuplicate_returns400() throws Exception {
-        service.createOrder("A001", 100);
+        service.createOrder("A001", money("100"));
 
         mockMvc.perform(post("/orders")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -100,12 +107,12 @@ class OrderControllerTest {
 
     @Test
     void getOne_found_returns200() throws Exception {
-        service.createOrder("A001", 100);
+        service.createOrder("A001", money("100"));
 
         mockMvc.perform(get("/orders/A001"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id").value("A001"))
-                .andExpect(jsonPath("$.amount").value(100))
+                .andExpect(jsonPath("$.amount").value(100.00))
                 .andExpect(jsonPath("$.status").value("UNPAID"));
     }
 
@@ -120,8 +127,8 @@ class OrderControllerTest {
 
     @Test
     void list_returnsArray() throws Exception {
-        service.createOrder("A001", 100);
-        service.createOrder("A002", 200);
+        service.createOrder("A001", money("100"));
+        service.createOrder("A002", money("200"));
 
         mockMvc.perform(get("/orders"))
                 .andExpect(status().isOk())
@@ -140,7 +147,7 @@ class OrderControllerTest {
 
     @Test
     void pay_success_returns200() throws Exception {
-        service.createOrder("A001", 100);
+        service.createOrder("A001", money("100"));
 
         mockMvc.perform(post("/orders/A001/pay"))
                 .andExpect(status().isOk())
@@ -150,7 +157,7 @@ class OrderControllerTest {
 
     @Test
     void pay_alreadyPaid_returns409() throws Exception {
-        service.createOrder("A001", 100);
+        service.createOrder("A001", money("100"));
         service.pay("A001");
 
         mockMvc.perform(post("/orders/A001/pay"))
@@ -169,7 +176,7 @@ class OrderControllerTest {
 
     @Test
     void cancel_success_returns200() throws Exception {
-        service.createOrder("A001", 100);
+        service.createOrder("A001", money("100"));
 
         mockMvc.perform(post("/orders/A001/cancel"))
                 .andExpect(status().isOk())
@@ -181,16 +188,16 @@ class OrderControllerTest {
 
     @Test
     void stats_returnsTotalsByStatus() throws Exception {
-        service.createOrder("A001", 100);
-        service.createOrder("A002", 200);
+        service.createOrder("A001", money("100"));
+        service.createOrder("A002", money("200"));
         service.pay("A001");
-        service.createOrder("A003", 50);
+        service.createOrder("A003", money("50"));
         service.cancel("A003");
 
         mockMvc.perform(get("/orders/stats"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.paid").value(100))
-                .andExpect(jsonPath("$.unpaid").value(200))
-                .andExpect(jsonPath("$.cancelled").value(50));
+                .andExpect(jsonPath("$.paid").value(100.00))
+                .andExpect(jsonPath("$.unpaid").value(200.00))
+                .andExpect(jsonPath("$.cancelled").value(50.00));
     }
 }

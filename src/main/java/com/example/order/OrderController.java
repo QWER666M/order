@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 
@@ -46,7 +47,7 @@ public class OrderController {
                 .toList();
     }
 
-    /** POST /orders —— 创建订单，请求体形如 {"id":"A001","amount":100} */
+    /** POST /orders —— 创建订单，请求体形如 {"id":"A001","amount":100.00} */
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public OrderResponse create(@RequestBody CreateOrderRequest request) {
@@ -88,7 +89,7 @@ public class OrderController {
 
     /** GET /orders/stats —— 按状态统计总金额 */
     @GetMapping("/stats")
-    public Map<String, Integer> stats() {
+    public Map<String, BigDecimal> stats() {
         return Map.of(
                 "unpaid", service.sumAmount(OrderStatus.UNPAID),
                 "paid", service.sumAmount(OrderStatus.PAID),

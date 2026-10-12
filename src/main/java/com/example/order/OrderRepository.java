@@ -20,7 +20,7 @@ public class OrderRepository {
     /** 把数据库的一行，变成一个 Order 对象。（每一列 → 构造方法的参数） */
     private static final RowMapper<Order> TO_ORDER = (rs, rowNum) -> new Order(
             rs.getString("id"),
-            rs.getInt("amount"),
+            rs.getBigDecimal("amount"),                 // 金额用 getBigDecimal，与 DECIMAL 列对应
             OrderStatus.valueOf(rs.getString("status"))
     );
 

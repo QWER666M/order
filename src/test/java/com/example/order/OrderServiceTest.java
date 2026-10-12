@@ -1,5 +1,6 @@
 package com.example.order;
 
+import java.math.BigDecimal;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -33,67 +34,116 @@ class OrderServiceTest {
         jdbc.update("DELETE FROM orders");
     }
 
-    // ================= 例子 1：正常情况 =================
+    /** 简写，让测试里的金额更像钱：money("100") */
+    private static BigDecimal money(String value) {
+        return new BigDecimal(value);
+    }
+
+    /**
+     * 断言金额相等。
+     *
+     * ★ 为什么不用 assertEquals？因为 BigDecimal 的 equals 会同时比较【数值】和【精度】：
+     *       new BigDecimal("100").equals(new BigDecimal("100.00"))   ->  false ！
+     *   而 compareTo 只比较数值大小，返回 0 表示相等：
+     *       new BigDecimal("100").compareTo(new BigDecimal("100.00")) ->  0
+     *   所以金额比较一律用 compareTo，不要用 equals。
+     */
+    private static void assertAmount(String expected, BigDecimal actual) {
+        assertEquals(0, new BigDecimal(expected).compareTo(actual),
+                "期望金额 " + expected + "，实际 " + actual);
+    }
+
+    // ================= 正常情况 =================
     @Test
     void createOrder_success() {
         // Arrange
         String id = "A001";
-        int amount = 100;
+        BigDecimal amount = new BigDecimal("100");
 
         // Act
         Order order = service.createOrder(id, amount);
 
         // Assert
         assertEquals("A001", order.getId());
-        assertEquals(100, order.getAmount());
+        assertAmount("100.00", order.getAmount());   // 精度已统一为两位小数
         assertEquals(OrderStatus.UNPAID, order.getStatus());
     }
 
-    // ================= 例子 2：该抛异常的情况 =================
+    /** 带小数的金额应能正常创建，且精度归一为两位小数。 */
+    @Test
+    void createOrder_decimalAmount_success() {
+        Order order = service.createOrder("A001", money("99.5"));
+
+        assertAmount("99.50", order.getAmount());    // 99.5 -> 99.50
+    }
+
+    // ================= 该抛异常的情况 =================
     @Test
     void createOrder_amountNotPositive_throws() {
         IllegalArgumentException e = assertThrows(
                 IllegalArgumentException.class,
-                () -> service.createOrder("A001", 0)   // 这段"应该"抛异常
+                () -> service.createOrder("A001", BigDecimal.ZERO)
         );
         assertEquals("金额必须大于 0", e.getMessage());
     }
 
-    // ================= 下面 4 个你自己写 =================
+    /** 超过两位小数的金额应被拒绝 —— 钱最多精确到"分"。 */
     @Test
-void createOrder_idDuplicate_throws() {
-    service.createOrder("A001", 100);          // 先建一次，成功
+    void createOrder_amountTooManyDecimals_throws() {
+        IllegalArgumentException e = assertThrows(
+                IllegalArgumentException.class,
+                () -> service.createOrder("A001", new BigDecimal("0.001"))
+        );
+        assertEquals("金额最多支持两位小数", e.getMessage());
+    }
 
-    IllegalArgumentException e = assertThrows(
-            IllegalArgumentException.class,
-            () -> service.createOrder("A001", 200)   // ← 填空1：再建一次"同一个订单号"
-    );
-    assertTrue(e.getMessage().contains("订单号已存在"));
-}
- @Test
-void createOrder_idEmpty_throws() {
-    IllegalArgumentException e = assertThrows(
-            IllegalArgumentException.class,
-            () -> service.createOrder("", 100)   // ← 订单号传空字符串
-    );
-    assertEquals("订单号不能为空", e.getMessage());   // ← 期望的那句错误信息
-}
-    
+    @Test
+    void createOrder_idDuplicate_throws() {
+        service.createOrder("A001", money("100"));
 
-   @Test
-void pay_unpaidOrder_success() {
-    service.createOrder("A001", 100);           // 建一个待支付订单
+        IllegalArgumentException e = assertThrows(
+                IllegalArgumentException.class,
+                () -> service.createOrder("A001", money("200"))
+        );
+        assertTrue(e.getMessage().contains("订单号已存在"));
+    }
 
-    boolean result = service.pay("A001");       // 支付
+    @Test
+    void createOrder_idEmpty_throws() {
+        IllegalArgumentException e = assertThrows(
+                IllegalArgumentException.class,
+                () -> service.createOrder("", money("100"))
+        );
+        assertEquals("订单号不能为空", e.getMessage());
+    }
 
-    assertTrue(result);                         // 断言1：返回 true
-    assertEquals(OrderStatus.PAID, service.findOrder("A001").getStatus());  // ← 填空3：付完应该是什么状态？
-}
-  @Test
-void pay_orderNotFound_returnsFalse() {
-    boolean result = service.pay("A002");         // ← 填空4：支付一个仓库里没有的订单号
-    assertFalse(result);
-}
+    @Test
+    void pay_unpaidOrder_success() {
+        service.createOrder("A001", money("100"));
+
+        boolean result = service.pay("A001");
+
+        assertTrue(result);
+        assertEquals(OrderStatus.PAID, service.findOrder("A001").getStatus());
+    }
+
+    @Test
+    void pay_orderNotFound_returnsFalse() {
+        boolean result = service.pay("A002");
+
+        assertFalse(result);
+    }
+
+    @Test
+    void sumAmount_sumsByStatus() {
+        service.createOrder("A001", money("10.10"));
+        service.createOrder("A002", money("20.20"));
+        service.createOrder("A003", money("0.70"));
+        service.pay("A002");
+
+        assertAmount("20.20", service.sumAmount(OrderStatus.PAID));
+        assertAmount("10.80", service.sumAmount(OrderStatus.UNPAID));   // 10.10 + 0.70
+    }
 
     // ================= 并发安全测试 =================
 
@@ -105,7 +155,7 @@ void pay_orderNotFound_returnsFalse() {
      */
     @Test
     void pay_concurrentOnlyOneSucceeds() throws Exception {
-        service.createOrder("A001", 100);
+        service.createOrder("A001", money("100"));
 
         int threads = 20;
         ExecutorService pool = Executors.newFixedThreadPool(threads);
@@ -139,7 +189,7 @@ void pay_orderNotFound_returnsFalse() {
     /** 并发扣款/取消同理：20 个线程同时取消，只能有 1 个成功。 */
     @Test
     void cancel_concurrentOnlyOneSucceeds() throws Exception {
-        service.createOrder("A001", 100);
+        service.createOrder("A001", money("100"));
 
         int threads = 20;
         ExecutorService pool = Executors.newFixedThreadPool(threads);
@@ -193,7 +243,7 @@ void pay_orderNotFound_returnsFalse() {
             pool.submit(() -> {
                 try {
                     startGate.await();
-                    service.createOrder("SAME-ID", 100);
+                    service.createOrder("SAME-ID", money("100"));
                     successCount.incrementAndGet();
                 } catch (IllegalArgumentException e) {
                     duplicateCount.incrementAndGet();       // 友好的业务错误

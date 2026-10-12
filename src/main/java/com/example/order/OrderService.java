@@ -1,5 +1,6 @@
 package com.example.order;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 import org.slf4j.Logger;
@@ -28,18 +29,26 @@ public class OrderService {
         this.repository = repository;
     }
 
-    public Order createOrder(String id, int amount) {
+    public Order createOrder(String id, BigDecimal amount) {
         if (id == null || id.trim().isEmpty()) {
             throw new IllegalArgumentException("订单号不能为空");
         }
-        if (amount <= 0) {
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
             throw new IllegalArgumentException("金额必须大于 0");
+        }
+        if (amount.scale() > 2) {
+            throw new IllegalArgumentException("金额最多支持两位小数");
         }
         if (repository.contains(id)) {
             throw new IllegalArgumentException("订单号已存在：" + id);
         }
 
-        Order order = new Order(id, amount, OrderStatus.UNPAID);
+        // 统一精度：不管入参是 100 还是 100.5，统一存成两位小数（100.00 / 100.50），
+        // 这样数据库里、接口返回的 JSON 里的金额格式始终一致。
+        // setScale(2) 在需要"舍入"时会抛异常 —— 上面已经拦掉了超过两位小数的入参。
+        BigDecimal normalized = amount.setScale(2);
+
+        Order order = new Order(id, normalized, OrderStatus.UNPAID);
         try {
             repository.add(order);
         } catch (DuplicateKeyException e) {
@@ -89,11 +98,13 @@ public class OrderService {
     }
 
     /** 统计某个状态下的订单总金额。 */
-    public int sumAmount(OrderStatus status) {
-        int sum = 0;
+    public BigDecimal sumAmount(OrderStatus status) {
+        BigDecimal sum = BigDecimal.ZERO;
         for (Order order : repository.listAll()) {
             if (order.getStatus() == status) {
-                sum += order.getAmount();
+                // ★ BigDecimal 不可变：add 返回新对象，必须接收返回值！
+                //   写成 sum.add(...) 会静默失效（sum 还是 0），是极常见的低级错误
+                sum = sum.add(order.getAmount());
             }
         }
         return sum;
