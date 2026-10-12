@@ -41,32 +41,19 @@ public class OrderService {
         return repository.listAll();
     }
 
-    /** 支付：只有待支付订单能支付。 */
+    /**
+     * 支付：只有待支付订单能支付。
+     *
+     * 并发安全由数据层的原子条件更新保证 —— 不再"先查状态、再判断、再更新"，
+     * 因为那三步之间存在窗口期，并发时可能两个请求都判定为"可以支付"。
+     */
     public boolean pay(String id) {
-        Order order = repository.get(id);
-        if (order == null) {
-            return false;
-        }
-        if (order.getStatus() != OrderStatus.UNPAID) {
-            return false;
-        }
-        order.setStatus(OrderStatus.PAID);
-        repository.update(order);   // ★ 必须写回数据库！否则改动只留在内存，重启就丢
-        return true;
+        return repository.updateStatusIfUnpaid(id, OrderStatus.PAID);
     }
 
     /** 取消：只有待支付订单能取消。 */
     public boolean cancel(String id) {
-        Order order = repository.get(id);
-        if (order == null) {
-            return false;
-        }
-        if (order.getStatus() != OrderStatus.UNPAID) {
-            return false;
-        }
-        order.setStatus(OrderStatus.CANCELLED);
-        repository.update(order);   // ★ 同上
-        return true;
+        return repository.updateStatusIfUnpaid(id, OrderStatus.CANCELLED);
     }
 
     /** 统计某个状态下的订单总金额。 */

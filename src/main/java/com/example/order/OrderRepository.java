@@ -38,11 +38,19 @@ public class OrderRepository {
                 order.getStatus().name());
     }
 
-    /** 更新订单状态（UPDATE）—— 支付/取消后必须调用它，否则改动只留在内存里 */
-    public void update(Order order) {
-        jdbc.update("UPDATE orders SET status = ? WHERE id = ?",
-                order.getStatus().name(),
-                order.getId());
+    /**
+     * 原子地把「待支付」订单改成新状态，返回是否成功（并发安全）。
+     *
+     * 关键：把"当前必须是 UNPAID"这个条件写进 UPDATE 的 WHERE 里，
+     * 由数据库在【一次操作内】完成"判断 + 修改"，不再有"先查后改"的窗口期。
+     * 返回受影响行数：1 = 我抢到了；0 = 订单不存在，或已被别人改成别的状态。
+     */
+    public boolean updateStatusIfUnpaid(String id, OrderStatus newStatus) {
+        int rows = jdbc.update("UPDATE orders SET status = ? WHERE id = ? AND status = ?",
+                newStatus.name(),
+                id,
+                OrderStatus.UNPAID.name());
+        return rows == 1;
     }
 
     /** 按订单号取一笔；没有就返回 null */

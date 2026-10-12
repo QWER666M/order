@@ -1,5 +1,11 @@
 package com.example.order;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -88,4 +94,79 @@ void pay_orderNotFound_returnsFalse() {
     boolean result = service.pay("A002");         // ← 填空4：支付一个仓库里没有的订单号
     assertFalse(result);
 }
+
+    // ================= 并发安全测试 =================
+
+    /**
+     * 20 个线程【同时】支付同一笔订单，只能有 1 个成功。
+     *
+     * 用 CountDownLatch 当"发令枪"：所有线程先集合等待，一声令下同时冲，
+     * 这样才能最大化冲突概率 —— 如果只是简单地依次调用，测不出并发问题。
+     */
+    @Test
+    void pay_concurrentOnlyOneSucceeds() throws Exception {
+        service.createOrder("A001", 100);
+
+        int threads = 20;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch startGate = new CountDownLatch(1);          // 发令枪
+        CountDownLatch doneGate = new CountDownLatch(threads);     // 等所有线程跑完
+        AtomicInteger successCount = new AtomicInteger();          // 线程安全的计数器
+
+        for (int i = 0; i < threads; i++) {
+            pool.submit(() -> {
+                try {
+                    startGate.await();                 // 所有线程在这儿等发令
+                    if (service.pay("A001")) {
+                        successCount.incrementAndGet();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    doneGate.countDown();
+                }
+            });
+        }
+
+        startGate.countDown();                             // ★ 发令！20 个线程同时冲
+        assertTrue(doneGate.await(10, TimeUnit.SECONDS), "线程未在 10 秒内跑完");
+        pool.shutdown();
+
+        assertEquals(1, successCount.get(), "同一笔订单只允许被支付成功一次");
+        assertEquals(OrderStatus.PAID, service.findOrder("A001").getStatus());
+    }
+
+    /** 并发扣款/取消同理：20 个线程同时取消，只能有 1 个成功。 */
+    @Test
+    void cancel_concurrentOnlyOneSucceeds() throws Exception {
+        service.createOrder("A001", 100);
+
+        int threads = 20;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch startGate = new CountDownLatch(1);
+        CountDownLatch doneGate = new CountDownLatch(threads);
+        AtomicInteger successCount = new AtomicInteger();
+
+        for (int i = 0; i < threads; i++) {
+            pool.submit(() -> {
+                try {
+                    startGate.await();
+                    if (service.cancel("A001")) {
+                        successCount.incrementAndGet();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    doneGate.countDown();
+                }
+            });
+        }
+
+        startGate.countDown();
+        assertTrue(doneGate.await(10, TimeUnit.SECONDS), "线程未在 10 秒内跑完");
+        pool.shutdown();
+
+        assertEquals(1, successCount.get(), "同一笔订单只允许被取消一次");
+        assertEquals(OrderStatus.CANCELLED, service.findOrder("A001").getStatus());
+    }
 }

@@ -16,6 +16,7 @@
   十、命令速查表
   十一、常见坑清单
   十二、面试问答速查
+  十三、并发安全（"先查后改"陷阱）
 
 
 ============================================================
@@ -670,6 +671,132 @@ Q10 什么是依赖注入？
 
 
 ============================================================
+十三、并发安全（"先查后改"陷阱）
+============================================================
+
+【13.1 问题：先查后改有时间窗口】
+
+  危险写法：
+      Order order = repository.get(id);                    // ① 查
+      if (order.getStatus() != UNPAID) return false;       // ② 判断（在 Java 里）
+      order.setStatus(PAID);
+      repository.update(order);                            // ③ 改
+
+  ① 和 ③ 是两条独立 SQL，中间隔着一段时间。这段时间里数据库可能已被别人改过。
+
+  两个请求同时支付同一笔订单：
+      请求A: 查到 UNPAID
+      请求B:              查到 UNPAID
+      请求A: 判断通过 -> 改成 PAID -> 保存 -> 返回"成功"
+      请求B:                          判断也通过 -> 改成 PAID -> 保存 -> 返回"成功"
+    结果：同一笔订单被"支付成功"两次。
+
+  ★ 实测（20 线程并发支付同一订单，用旧的"先查后改"写法）：
+      成功次数 = 17 次！   （不是 1 次）
+    这种 bug 平时测试很容易漏掉，因为它是"时序相关"的 ——
+    两个请求错开一点点就没事，上线半年可能都不出现，一出现就是资金问题。
+
+【13.2 修复：把判断条件写进 SQL 的 WHERE】
+
+  "检查"放在哪里，决定了它安不安全：
+
+      放在 Java 里（if 判断）  -> ❌ 检查和修改之间有窗口期
+      放在 SQL 的 WHERE 里     -> ✅ 检查和修改在同一个原子操作内
+
+  修复后的 SQL：
+      -- 修改前：无条件改
+      UPDATE orders SET status = ? WHERE id = ?
+
+      -- 修改后：改的时候顺便检查状态
+      UPDATE orders SET status = ? WHERE id = ? AND status = 'UNPAID'
+
+  数据库执行单条 SQL 是【原子】的 —— 要么全部生效，要么完全不生效，不会被插队。
+  两个请求必然排队：先到的改成功（rows=1），后到的发现条件不满足（rows=0）。
+
+【13.3 靠"受影响行数"判断成败】
+
+  jdbc.update(...) 返回被修改的行数：
+
+      int rows = jdbc.update(
+              "UPDATE orders SET status = ? WHERE id = ? AND status = ?",
+              newStatus.name(), id, OrderStatus.UNPAID.name());
+      return rows == 1;
+
+      rows == 1  -> 我改到了，说明订单存在且当时还是 UNPAID -> 我抢到了，成功
+      rows == 0  -> 一行都没改到 -> 订单不存在，或已被别人改了 -> 失败
+
+  好处：不需要额外查询、不需要加锁、不需要 synchronized，
+        一条 SQL 同时完成"检查 + 修改 + 判断结果"。
+
+【13.4 Service 层随之简化】
+
+  修复前（11 行，且 pay / cancel 几乎重复）：
+      public boolean pay(String id) {
+          Order order = repository.get(id);
+          if (order == null) return false;
+          if (order.getStatus() != OrderStatus.UNPAID) return false;
+          order.setStatus(OrderStatus.PAID);
+          repository.update(order);
+          return true;
+      }
+
+  修复后（1 行，pay / cancel 共用同一个数据层方法）：
+      public boolean pay(String id) {
+          return repository.updateStatusIfUnpaid(id, OrderStatus.PAID);
+      }
+
+      public boolean cancel(String id) {
+          return repository.updateStatusIfUnpaid(id, OrderStatus.CANCELLED);
+      }
+
+  原来的三件事（查存在、查状态、改状态）合并成一条 SQL。
+  附带好处：少一次查询、消除重复代码。
+
+【13.5 同一模式的通用场景（面试加分）】
+
+  凡是"检查某个条件，然后基于该条件做修改"都要考虑并发，写法都一样：
+
+      扣库存（不会超卖）：
+          UPDATE product SET stock = stock - 1 WHERE id = ? AND stock > 0
+
+      转账扣款（余额不足就扣不动）：
+          UPDATE account SET balance = balance - ? WHERE id = ? AND balance >= ?
+
+      领优惠券 / 抢红包：同理，把"还有余量"写进 WHERE
+
+【13.6 怎么测并发（CountDownLatch 发令枪）】
+
+  关键：要让线程【同时】冲，而不是依次调用。用 CountDownLatch 当发令枪：
+
+      CountDownLatch startGate = new CountDownLatch(1);   // 发令枪
+      // 所有线程先 startGate.await() 集合等待
+      // 主线程 startGate.countDown() 一声令下，20 个线程同时冲
+      assertEquals(1, successCount.get());                // 只能有 1 个成功
+
+  注意点：
+      - 计数要用 AtomicInteger（普通 int++ 不是线程安全的）
+      - 断言"恰好 1 个成功"，而不是"至少 1 个"—— 后者测不出重复支付
+
+  实测（修复后，20 线程并发支付）：
+      单元测试：Tests run: 8, Failures: 0
+      HTTP 端到端：HTTP 200 出现 1 次，HTTP 409 出现 19 次  ✅
+
+【13.7 什么时候需要事务 @Transactional】
+
+  事务 = 一组操作"要么全成功，要么全失败"（ACID 里的 A：原子性）。
+  Spring 的 @Transactional：方法内抛异常 -> 自动回滚。
+
+  什么时候需要？
+      当一次业务操作包含【多条】写操作时。
+      例如：支付 = 改订单状态 + 插支付流水 + 更新统计表
+            如果第 2 步失败，没有事务就会留下"订单已支付但没有流水"的脏数据。
+
+      反之：只有一条写操作时，单条 SQL 本身就是原子的，不需要显式事务。
+
+  ★ 能答出"什么时候不需要事务"，比只会说"我会加 @Transactional"更显成熟。
+
+
+============================================================
 【学习历程回顾】
 ============================================================
   Step 1  OrderStatus.java      枚举，类型安全的状态取值
@@ -681,6 +808,7 @@ Q10 什么是依赖注入？
   Step 6  Maven + JUnit         标准工程结构、6 个单元测试
   Step 7  Spring Boot           REST 接口、注解、依赖注入实战、Swagger UI
   Step 8  持久化                 H2 + JdbcTemplate，数据重启不丢
+  Step 9  并发安全               原子条件更新（UPDATE ... WHERE 条件），20 线程压测验证
 
 ============================================================
   笔记结束。卡住的时候先翻"常见坑清单"，再去"面试问答"自测。
