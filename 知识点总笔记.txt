@@ -25,10 +25,10 @@
 
 【一句话】每层只干一件事，依赖箭头只能向下。
 
-  用户（浏览器 / 键盘）
+  用户（浏览器 / curl / Postman）
         |
         v
-  界面层  Main.java（控制台） / OrderController.java（Web）
+  界面层  OrderController.java（HTTP 接口）
         |        只负责：读输入、显示结果；不做任何业务判断
         v
   业务层  OrderService.java
@@ -43,15 +43,16 @@
 【各文件职责】
   OrderStatus.java ... 枚举，定义状态取值：UNPAID / PAID / CANCELLED
   Order.java ......... 实体，3 个字段 + 构造方法 + getter + setStatus + toString
-  OrderRepository.java 数据层，add / update / get / listAll / contains / size
+  OrderRepository.java 数据层，add / updateStatusIfUnpaid / get / listAll / listPage / contains / count
   OrderService.java .. 业务层，createOrder / findOrder / listOrders / pay / cancel / sumAmount
-  Main.java .......... 控制台入口，菜单 + Scanner 读输入
-  OrderAppApplication.java  Web 入口，@SpringBootApplication
-  OrderController.java  Web 接口层，把 HTTP 请求翻译成 service 调用
-  ApiExceptionHandler.java  全局异常处理，Java 异常 -> HTTP 400 + JSON
+  OrderAppApplication.java  程序入口，@SpringBootApplication
+  OrderController.java  接口层，把 HTTP 请求翻译成 service 调用
+  ApiExceptionHandler.java  全局异常处理，所有异常 -> 统一 JSON 格式
+  dto/ ............... 对外数据结构：CreateOrderRequest / OrderResponse / PageResponse
+  （早期的控制台入口 Main.java 已在项目转为 Web 服务后删除）
 
 【最核心的一句话】
-  Main / OrderController 里【一个业务判断都没有】。
+  OrderController 里【一个业务判断都没有】。
   规则全在 OrderService —— 改规则只动一个文件。
   这就是为什么不用把代码全塞进一个文件里。
 
@@ -152,6 +153,55 @@
     1) 去掉 final + 加 public setAmount    -> 谁都能随时改，规则没地方拦
     2) 保留私有 + 提供带校验的 correctAmount（推荐）-> 能改，且必须过规则
     3) 干脆不改，作废这张、重开一张        -> 最干净，保留完整历史
+
+
+【2.8 BigDecimal：钱必须用它】
+
+  三种选择的对比：
+
+      int    ：存不了小数（金额常有"分"，如 99.99）
+      double ：二进制浮点无法精确表示十进制小数 —— 实测：
+                 0.1 + 0.2 = 0.30000000000000004
+               钱算错了是事故，所以货币绝不能用 double / float
+      BigDecimal：精确十进制，专为货币与科学计算设计
+
+  数据库对应类型：DECIMAL(12,2)
+      DECIMAL(总位数, 小数位数) —— 12 位、其中 2 位小数，最大 9999999999.99
+
+  ★ 三个必须记住的坑：
+
+    1) 累加时必须接收返回值（BigDecimal 不可变！）
+
+        BigDecimal sum = BigDecimal.ZERO;
+        sum.add(x);              // ❌ 白算！sum 还是 0（返回值被丢了）
+        sum = sum.add(x);        // ✅
+
+       ★ 这个错误【不会编译报错、不会运行报错】，只是结果不对 —— 极危险。
+
+    2) 比较相等【不能用 equals】，要用 compareTo
+
+        new BigDecimal("100").equals(new BigDecimal("100.00"))    -> false ！（精度不同）
+        new BigDecimal("100").compareTo(new BigDecimal("100.00")) -> 0      （只比数值）
+
+    3) 构造时【传字符串】，不要传 double
+
+        new BigDecimal(0.1)     // ❌ 会把 double 的误差原样带进来：0.1000000000000000055511151231257827021181583404541015625
+        new BigDecimal("0.1")   // ✅ 精确
+
+  比较大小的写法（别用 < > 运算符，BigDecimal 没有）：
+
+        if (amount.compareTo(BigDecimal.ZERO) <= 0) { ... }   // 相当于 amount <= 0
+
+  ★ 精度统一（scale）：
+     new BigDecimal("100")   -> scale 0
+     new BigDecimal("100.00")-> scale 2
+     本项目在创建订单时统一 setScale(2)，
+     保证数据库里、接口返回的 JSON 里金额格式一致（100 -> 100.00）。
+     scale() 还可以用来做校验：scale > 2 就说明传了"厘"以下的精度，可以拒绝。
+
+  ★ 面试话术："金额我用 BigDecimal，数据库用 DECIMAL(12,2)。
+    因为 double 是二进制浮点，0.1 + 0.2 会得到 0.30000000000000004；
+    另外 BigDecimal 不可变，add 要接收返回值，比较要用 compareTo 而不是 equals。"
 
 
 ============================================================
@@ -639,7 +689,69 @@
     OrderRepository.java     重写方法体（Map -> SQL）
     OrderService.java        pay / cancel 各加一句 repository.update(order)
     OrderServiceTest.java    改成 @SpringBootTest + 清表
-  没动：Main.java、OrderController.java、Order.java、OrderStatus.java、ApiExceptionHandler.java
+  没动：OrderController.java、Order.java、OrderStatus.java、ApiExceptionHandler.java
+
+【8.10 分页：为什么必须做、怎么做】
+
+  为什么不能"一次返回全部"？
+    - 内存：10 万条一次性读进 List，可能直接 OOM（内存溢出）
+    - 速度：传输 + 序列化 10 万条 JSON，响应几秒甚至超时
+    - 数据库：大结果集长时间占用连接和 IO
+  分页 = 让客户端"一页一页拿"，每次只取固定条数。
+
+  ★ 关键：分页要【由数据库完成】，不是查出来再截断
+
+      // ❌ 假分页：还是把全表读进了内存，只是返回时少给几条
+      List<Order> all = repository.listAll();
+      return all.subList(offset, min(all.size(), offset + size));
+
+      // ✅ 真分页：让数据库只返回需要的行
+      SELECT id, amount, status FROM orders ORDER BY seq LIMIT ? OFFSET ?;
+      // 参数：limit=每页条数, offset=(page-1)*size
+
+    （H2、MySQL、PostgreSQL 都支持 LIMIT ? OFFSET ? 这种写法。）
+
+  ★ 两个最容易被问/最容易写错的点：
+
+    1) 偏移量怎么算：offset = (page - 1) * size
+       第 1 页 -> 0（从第一条开始）；第 2 页 -> size（跳过第一页的 size 条）
+       写错就出现"第 2 页重复出现第 1 页最后一条"这类 off-by-one bug。
+
+    2) size 必须有上限！
+       如果允许 size=999999，客户端一请求就等于把全表拉走了 —— 等于没分页。
+       所以业务层校验：1 <= size <= 100（本项目 MAX_PAGE_SIZE）。
+
+  ★ 返回结构（不要只返回个数组，客户端算不出总数）：
+
+      {
+        "items": [ ... ],     // 当前页数据
+        "total": 25,          // 总记录数
+        "page": 1,            // 当前页码（本项目从 1 开始）
+        "size": 10,           // 每页条数
+        "totalPages": 3       // 总页数 = ceil(total / size)
+      }
+
+    总页数向上取整的写法：(total + size - 1) / size
+      例：25 条 / 每页 10 条 -> (25 + 9) / 10 = 3 页
+
+  ★ 页码从 0 还是从 1 开始？
+    两种都在用：Spring Data 习惯从 0 开始，很多面向人的 API 从 1 开始。
+    没有对错，关键是【项目内统一】并且【写进文档】。本项目用 1 开始。
+
+  ★ 一个通用技巧：PageResponse<T> 用泛型 + map()
+    业务层返回 PageResponse<Order>，接口层一行转换成 PageResponse<OrderResponse>：
+
+        return service.listOrders(page, size).map(OrderResponse::from);
+
+    分页信息（total/page/size）原样保留，只有 items 的元素类型变了。
+
+  ★ 坑：Jackson 只认 getXxx() 命名
+    记录类里写 totalPages() 不会出现在 JSON 里，要写成 getTotalPages()。
+
+  ★ 顺带一提：本项目 sumAmount 仍是"查出全部再累加"，
+    数据量大时也应该改成让数据库算聚合：
+        SELECT SUM(amount) FROM orders WHERE status = ?
+    —— 同样是"别把全表读进内存"的思路。
 
 
 ============================================================
@@ -1100,6 +1212,7 @@ Q10 什么是依赖注入？
   Step 13 修复两个遗留缺陷        并发创建竞态（19/20 变 500 -> 统一 400）；
                                 全局异常兜底，8 条错误路径格式统一
   Step 14 日志与 CI               SLF4J 分级日志；GitHub Actions 自动构建与测试
+  Step 15 BigDecimal 与分页       金额精度（DECIMAL(12,2)）；LIMIT/OFFSET 真分页 + 参数上限
 
 ============================================================
   笔记结束。卡住的时候先翻"常见坑清单"，再去"面试问答"自测。
