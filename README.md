@@ -37,7 +37,7 @@
             ▼
 ┌───────────────────────────┐
 │  接口层 OrderController    │  只负责：解析 HTTP 请求、返回响应
-│  (Main 为控制台版入口)      │  不做任何业务判断
+│                           │  不做任何业务判断
 └───────────────────────────┘
             │
             ▼
@@ -60,7 +60,11 @@
 
 **设计要点**：业务规则全部集中在 `OrderService`，`OrderController` 中没有任何业务判断逻辑。
 因此更换数据存储方式时，只需修改 `OrderRepository` 一层 —— 本项目从内存 `Map` 迁移到 H2 数据库时，
-`OrderController`、`Main`、`Order`、`OrderStatus` 均无需修改。
+`OrderController`、`Order`、`OrderStatus` 均无需修改。
+
+**对外契约与内部模型分离**：接口层不直接暴露 `Order` 实体，而是使用 `dto` 包中的
+`CreateOrderRequest`（入参）与 `OrderResponse`（出参）。这样实体的内部结构可以自由演化，
+而不会破坏对外的 API 契约，同时也明确了「哪些字段对外可见」。
 
 ## 快速开始
 
@@ -181,10 +185,12 @@ order-app/
     │   │   ├── OrderController.java         REST 接口层
     │   │   ├── OrderService.java            业务层（业务规则）
     │   │   ├── OrderRepository.java         数据层（数据库访问）
-    │   │   ├── Order.java                   订单实体
+    │   │   ├── Order.java                   订单实体（内部模型）
     │   │   ├── OrderStatus.java             订单状态枚举
     │   │   ├── ApiExceptionHandler.java     全局异常处理
-    │   │   └── Main.java                    控制台版入口（演示用）
+    │   │   └── dto/
+    │   │       ├── CreateOrderRequest.java   入参 DTO
+    │   │       └── OrderResponse.java        出参 DTO
     │   └── resources/
     │       ├── application.properties       数据库与应用配置
     │       └── schema.sql                   建表脚本
