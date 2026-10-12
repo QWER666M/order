@@ -2,6 +2,7 @@ package com.example.order;
 
 import java.util.List;
 
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
 /**
@@ -29,7 +30,14 @@ public class OrderService {
         }
 
         Order order = new Order(id, amount, OrderStatus.UNPAID);
-        repository.add(order);
+        try {
+            repository.add(order);
+        } catch (DuplicateKeyException e) {
+            // 并发兜底：上面的 contains 检查与这里的插入之间存在窗口期，
+            // 两个请求可能都通过了检查，后到的那个会在数据库唯一约束上失败。
+            // 把它翻译成同样的业务错误，而不是让数据库异常冒出去变成 500。
+            throw new IllegalArgumentException("订单号已存在：" + id);
+        }
         return order;
     }
 

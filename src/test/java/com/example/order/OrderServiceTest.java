@@ -169,4 +169,50 @@ void pay_orderNotFound_returnsFalse() {
         assertEquals(1, successCount.get(), "同一笔订单只允许被取消一次");
         assertEquals(OrderStatus.CANCELLED, service.findOrder("A001").getStatus());
     }
+
+    /**
+     * 20 个线程【同时】创建同一个订单号，只能有 1 个成功。
+     *
+     * 这一条覆盖的是"先查后插"的窗口期：contains 检查与 INSERT 之间，
+     * 两个请求可能都通过了检查，后到的那个会撞上数据库唯一约束。
+     * 期望结果是：1 个成功，其余都是友好的 IllegalArgumentException，
+     * 而不是数据库异常（那会变成 500，让用户以为系统故障）。
+     */
+    @Test
+    void createOrder_concurrentSameId_onlyOneSucceeds() throws Exception {
+        int threads = 20;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch startGate = new CountDownLatch(1);
+        CountDownLatch doneGate = new CountDownLatch(threads);
+
+        AtomicInteger successCount = new AtomicInteger();
+        AtomicInteger duplicateCount = new AtomicInteger();
+        AtomicInteger unexpectedCount = new AtomicInteger();
+
+        for (int i = 0; i < threads; i++) {
+            pool.submit(() -> {
+                try {
+                    startGate.await();
+                    service.createOrder("SAME-ID", 100);
+                    successCount.incrementAndGet();
+                } catch (IllegalArgumentException e) {
+                    duplicateCount.incrementAndGet();       // 友好的业务错误
+                } catch (RuntimeException e) {
+                    unexpectedCount.incrementAndGet();      // 数据库异常等意外错误
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    doneGate.countDown();
+                }
+            });
+        }
+
+        startGate.countDown();
+        assertTrue(doneGate.await(15, TimeUnit.SECONDS), "线程未在 15 秒内跑完");
+        pool.shutdown();
+
+        assertEquals(1, successCount.get(), "同一个订单号只允许创建成功一次");
+        assertEquals(0, unexpectedCount.get(), "不应出现数据库异常等意外错误（那会变成 500）");
+        assertEquals(threads - 1, duplicateCount.get(), "其余请求应返回友好的业务错误");
+    }
 }

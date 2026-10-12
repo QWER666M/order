@@ -12,8 +12,10 @@
 - **金额统计**：按订单状态汇总总金额
 - **数据持久化**：使用 H2 文件数据库，服务重启后数据不丢失
 - **并发安全**：通过数据库原子条件更新保证同一笔订单不会被重复支付
-- **统一异常处理**：所有错误响应统一为 `{"error": "..."}` 格式，并映射为语义化的 HTTP 状态码
-  （400 参数不合法 / 404 资源不存在 / 409 状态冲突），避免暴露 Spring 默认错误页的内部信息
+- **统一异常处理**：所有错误响应统一为 `{"error": "..."}` 格式，并保留语义化的 HTTP 状态码
+  （400 参数不合法 / 404 资源不存在 / 405 方法不支持 / 409 状态冲突 / 415 媒体类型不支持 / 500 服务器内部错误）。
+  实现上继承 `ResponseEntityExceptionHandler`，因此框架自身抛出的标准异常（JSON 格式错误等）
+  也会走同一套格式，不会破坏框架判定的状态码
 - **接口文档**：集成 Swagger UI，可在浏览器中直接调试所有接口
 
 ## 技术栈
@@ -159,9 +161,14 @@ curl -X POST http://localhost:8080/orders \
 | 订单号重复 | 400 | `{"error": "订单号已存在：A001"}` |
 | 订单不存在 | 404 | `{"error": "订单不存在：A001"}` |
 | 状态冲突（重复支付/取消已支付订单） | 409 | `{"error": "支付失败：订单不存在或不是待支付状态"}` |
+| 请求体 JSON 格式错误 | 400 | `{"error": "Bad Request"}` |
+| 请求方法不支持 | 405 | `{"error": "Method Not Allowed"}` |
+| 请求 Content-Type 不支持 | 415 | `{"error": "Unsupported Media Type"}` |
+| 未预期的服务端异常 | 500 | `{"error": "服务器内部错误"}` |
 
-由 `ApiExceptionHandler` 统一处理，避免使用 Spring 默认错误页
-（默认错误页会返回 `timestamp`、`path` 等内部信息，且格式与业务错误不一致）。
+由 `ApiExceptionHandler` 统一处理。该处理器继承 Spring 的 `ResponseEntityExceptionHandler`，
+因此**框架自身抛出的标准异常**（如 JSON 解析失败）也会返回统一格式，且保留框架判定的状态码；
+对未预期的异常（500）则**记录完整堆栈到服务端日志**，对外只返回一句不含内部细节的提示。
 
 支付订单：
 
@@ -242,9 +249,9 @@ CREATE TABLE orders (
 
 ## 测试
 
-共 **22 个测试**，分为两层：
+共 **23 个测试**，分为两层：
 
-### 业务层测试 `OrderServiceTest`（8 个）
+### 业务层测试 `OrderServiceTest`（9 个）
 
 直接调用 `OrderService` 的 Java 方法，验证业务规则与并发安全：
 
@@ -258,6 +265,7 @@ CREATE TABLE orders (
 | `pay_orderNotFound_returnsFalse` | 支付不存在的订单返回 false |
 | `pay_concurrentOnlyOneSucceeds` | 20 线程并发支付同一订单，**仅 1 个成功** |
 | `cancel_concurrentOnlyOneSucceeds` | 20 线程并发取消同一订单，**仅 1 个成功** |
+| `createOrder_concurrentSameId_onlyOneSucceeds` | 20 线程并发创建同一订单号，**仅 1 个成功，其余为友好业务错误（不产生 500）** |
 
 ### 接口层测试 `OrderControllerTest`（14 个）
 
@@ -308,3 +316,17 @@ mvn test -Dtest=OrderServiceTest#pay_concurrentOnlyOneSucceeds   # 只跑某一�
 
   该模式同样适用于扣库存（`WHERE stock > 0`）、转账（`WHERE balance >= ?`）等并发场景。
   测试中已通过 20 线程并发压测验证：仅 1 个请求成功，其余返回 409。
+
+- **创建订单的并发安全**：「先查询是否存在、再插入」同样存在窗口期，两个请求可能都通过检查，
+  后到的那个会撞上数据库 `UNIQUE` 约束。因此捕获该异常并翻译为相同的业务错误，
+  避免可预期的"订单号重复"变成 500 服务器错误：
+
+  ```java
+  try {
+      repository.add(order);
+  } catch (DuplicateKeyException e) {
+      throw new IllegalArgumentException("订单号已存在：" + id);
+  }
+  ```
+
+  实测（20 个并发请求创建同一订单号）：修复前 19 个返回 **500**，修复后 19 个返回 **400**。

@@ -600,6 +600,57 @@
 
           String text = (message == null || message.isBlank()) ? fallback : message;
 
+  ★ 进阶：让【框架自己的异常】也统一（重要）
+
+    上面只处理了业务异常。但 Spring MVC 自己还会抛很多标准异常：
+
+        非法 JSON        -> HttpMessageNotReadableException  -> 400
+        方法不支持       -> HttpRequestMethodNotSupportedException -> 405
+        Content-Type 不对 -> HttpMediaTypeNotSupportedException -> 415
+        数据库异常       -> DataIntegrityViolationException  -> 500
+
+    这些【不处理就会走 Spring 默认错误页】，返回：
+        {"timestamp":"...","status":400,"error":"Bad Request","path":"/orders"}
+    → 格式和业务错误不一致，客户端要写两套解析。
+
+    正确做法：让处理器【继承 ResponseEntityExceptionHandler】
+
+        @RestControllerAdvice
+        public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
+
+            @ExceptionHandler(IllegalArgumentException.class) ...    // 业务 400
+            @ExceptionHandler(ResponseStatusException.class) ...     // 404 / 409
+            @ExceptionHandler(Exception.class) ...                   // 兜底 500
+
+            @Override
+            protected ResponseEntity<Object> handleExceptionInternal(
+                    Exception ex, Object body, HttpHeaders headers,
+                    HttpStatusCode statusCode, WebRequest request) {  // 框架标准异常都走这里
+                ...
+            }
+        }
+
+    为什么继承它？
+      父类【已经内置】了所有标准异常的处理，并判定好正确状态码。
+      你只需重写 handleExceptionInternal 换掉响应体 ——
+      既统一了格式，又不会把 400 误判成 500。
+
+  ★ 500 的处理原则（两条，都要记）：
+      日志里说全话：log.error("未预期的异常", e)   —— 打完整堆栈，便于排查
+      响应里说最少话：{"error":"服务器内部错误"}    —— 不暴露堆栈、SQL、类名
+    （Spring Boot 默认 server.error.include-stacktrace=never，所以默认也不会泄露，
+      但格式不统一；自己兜底就能两全。）
+
+  最后实测（8 条错误路径全部统一为 {"error": "..."}）：
+
+      订单号为空/重复/金额非法   400
+      非法 JSON                400
+      查询不存在               404
+      方法不支持               405
+      重复支付                 409
+      Content-Type 不支持      415
+      数据库异常（订单号超长）  500
+
 【9.2 状态码该由谁决定】
 
   经验法则：
@@ -714,6 +765,19 @@
   编译：javac -encoding UTF-8
   运行：-Dstdout.encoding=UTF-8 -Dstdin.encoding=UTF-8
   Maven 报错英文：$env:JAVA_TOOL_OPTIONS = "-Duser.language=en -Duser.country=US"
+
+【11】改了构造方法/方法签名后，编译错误被"藏"起来
+  原因：Maven 默认增量编译，只重编时间戳变化的文件，
+        调用方的源文件没动就可能跳过重编，错误被掩盖。
+  现象：改完运行正常，某次全量编译突然报错。
+  解决：改签名后跑 mvn clean test。
+
+【12】"先查后写"导致的并发问题（两个地方都踩过）
+  pay/cancel：先查状态再更新 -> 并发下重复支付
+    修：把条件写进 SQL 的 WHERE（原子更新）
+  createOrder：先查是否存在再插入 -> 并发下撞唯一约束 -> 500
+    修：捕获 DuplicateKeyException，翻译成业务错误（400）
+  ★ 修完一处要主动检查同类写法还有没有别处。
 
 
 ============================================================
@@ -896,6 +960,43 @@ Q10 什么是依赖注入？
 
   ★ 能答出"什么时候不需要事务"，比只会说"我会加 @Transactional"更显成熟。
 
+【13.8 同类问题："先查后插"也一样有窗口期】
+
+  修好 pay/cancel 之后要注意：【创建订单也有同样的问题】。
+
+      if (repository.contains(id)) {                    // ① 查：不存在
+          throw new IllegalArgumentException("订单号已存在：" + id);
+      }
+      Order order = new Order(id, amount, UNPAID);
+      repository.add(order);                            // ② 插：可能撞唯一约束
+
+  ① 和 ② 之间，别的请求可能已经插进去了 —— 后到的会撞上数据库的 UNIQUE 约束。
+
+  实测（20 个并发创建同一订单号）：
+      创建成功           = 1
+      友好业务错误(400)  = 0
+      数据库异常(→500)   = 19    ← 19 个请求返回了 500！
+
+  ★ 危害：用户看到 500 会以为"系统坏了"，其实只是"订单号重复"——
+    一个可预期的业务结果，被当成了服务器故障。
+
+  修法：把数据库异常【翻译】成同样的业务错误：
+
+      try {
+          repository.add(order);
+      } catch (DuplicateKeyException e) {          // Spring 对"唯一约束冲突"的封装
+          throw new IllegalArgumentException("订单号已存在：" + id);
+      }
+
+  修复后实测：201 出现 1 次，400 出现 19 次，500 出现 0 次。
+
+  ★ 通用思路（值得记住）：
+    凡是"先查再写"的地方，都要问一句"查完之后、写之前，条件可能变吗？"
+    变了就两种兜法：
+      a) 把条件写进 SQL 的 WHERE（如 UPDATE ... WHERE status = 'UNPAID'）
+      b) 让数据库约束兜底，再把这个异常【翻译】成友好错误
+    修了一处并发问题后，要主动检查【同类写法】还有没有别的地方 —— 这叫举一反三。
+
 
 ============================================================
 【学习历程回顾】
@@ -915,6 +1016,8 @@ Q10 什么是依赖注入？
   Step 10 DTO 分层               CreateOrderRequest / OrderResponse，防篡改与防泄露
   Step 11 统一错误响应           所有错误统一为 {"error": "..."}（400/404/409）
   Step 12 接口层测试             MockMvc 测状态码与 JSON 契约，测试总数 8 -> 22
+  Step 13 修复两个遗留缺陷        并发创建竞态（19/20 变 500 -> 统一 400）；
+                                全局异常兜底，8 条错误路径格式统一
 
 ============================================================
   笔记结束。卡住的时候先翻"常见坑清单"，再去"面试问答"自测。
