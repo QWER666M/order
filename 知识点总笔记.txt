@@ -1347,6 +1347,47 @@ Q10 什么是依赖注入？
   本项目启动时得到的是 "Access denied"，
   说明驱动、地址、端口、连接池【全都对】，只差建库建账号。
 
+【14.10 MySQL 端到端验证结果（真机跑过）】
+
+  验证方法：用本机已装的 MySQL 8.1 二进制，另起一个【独立的临时实例】（3307 端口），
+  不动原有的 3306 实例、不需要管理员权限、不需要 Docker。
+
+  步骤（这个技巧很实用）：
+    # 1) 初始化一个全新数据目录（root 空密码）
+    mysqld --initialize-insecure --basedir="<MySQL目录>" --datadir="<空目录>"
+    # 2) 用非默认端口启动（避开已被占用的 3306）
+    mysqld --basedir=... --datadir=... --port=3307 --bind-address=127.0.0.1 --mysqlx=OFF
+    # 3) 建库建号
+    mysql -h 127.0.0.1 -P 3307 -u root -e "CREATE DATABASE orderdb ...; CREATE USER ..."
+    # 4) 应用用【环境变量】覆盖数据源地址（不改已提交的配置文件）
+    $env:SPRING_DATASOURCE_URL = "jdbc:mysql://127.0.0.1:3307/orderdb?..."
+    mvn spring-boot:run
+
+  ★ 用环境变量覆盖配置：Spring Boot 的 relaxed binding —— 
+    环境变量 SPRING_DATASOURCE_URL 会自动映射到 spring.datasource.url，
+    且【环境变量优先级高于配置文件】。适合临时验证、不适合写进代码库。
+
+  验证结果（全部通过）：
+    - 启动日志出现 "OrderHikariPool - Added connection com.mysql.cj.jdbc.ConnectionImpl"
+      -> 证明真的建了 MySQL 连接（不是 H2）
+    - 创建 / 分页 / 校验 / 支付 / 重复支付(409) / 统计 全部正常
+    - 金额小数（199.99、0.01）精确无误
+    - 应用停止后直接查 MySQL：数据仍在
+    - 重启应用：数据完好、状态未丢（MYSQL-01 仍是 PAID）-> 真持久化
+    - 20 并发支付同一订单：1 成功 + 19 冲突；20 并发取消同理
+      -> 说明"原子条件更新（UPDATE ... WHERE status=?）"在 MySQL 上同样并发安全
+
+【14.11 测试踩到的一个"假故障"：PowerShell 传 URL 参数】
+
+  现象：curl 请求 "http://localhost:8080/orders?page=1&size=2" 返回空，看起来像 bug。
+  原因：PowerShell 把含 & 的参数传给【原生 exe】时会被吃掉/截断（& 在 PowerShell 里是特殊字符）。
+  解决：改用显式写法之一
+      curl.exe -s --url "http://localhost:8080/orders?page=1&size=2"
+      curl.exe -s --get --data-urlencode "page=1" --data-urlencode "size=2" "http://localhost:8080/orders"
+
+  ★ 教训：验证时结果反常，先怀疑【测试工具/命令行】，再怀疑代码。
+    判断方法：换个调用方式再试一次 —— 换了就对，说明问题在测试手法，不在代码。
+
 
 ============================================================
 【学习历程回顾】
@@ -1372,6 +1413,7 @@ Q10 什么是依赖注入？
   Step 14 日志与 CI               SLF4J 分级日志；GitHub Actions 自动构建与测试
   Step 15 BigDecimal 与分页       金额精度（DECIMAL(12,2)）；LIMIT/OFFSET 真分页 + 参数上限
   Step 16 迁移到 MySQL            Profile 多环境、HikariCP 连接池、Docker Compose 起库
+                                  ★ 已用独立的临时 MySQL 实例完成端到端验证
 
 ============================================================
   笔记结束。卡住的时候先翻"常见坑清单"，再去"面试问答"自测。
