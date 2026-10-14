@@ -17,6 +17,7 @@
   十一、常见坑清单
   十二、面试问答速查
   十三、并发安全（"先查后改"陷阱）
+  十四、从 H2 迁移到 MySQL（Profile / Docker / 连接池）
 
 
 ============================================================
@@ -972,6 +973,18 @@
     修：捕获 DuplicateKeyException，翻译成业务错误（400）
   ★ 修完一处要主动检查同类写法还有没有别处。
 
+【13】.properties 文件里写了行尾注释 -> 启动直接崩
+  现象：Failed to bind properties under '...' to long:
+        Value: "30000  # 说明文字"
+  原因：# 只有出现在【行首】才是注释，写在 = 后面会成为值的一部分。
+  解决：注释单独占一行。
+  教训：配置改完一定要真的启动一次，光看是看不出来的。
+
+【14】误以为"容器起来了 = 数据库能用了"
+  现象：docker compose up 之后立刻启动应用，连接被拒绝。
+  原因：MySQL 首次启动要初始化几十秒，这期间端口虽在监听但还不接受连接。
+  解决：在 docker-compose.yml 里配 healthcheck，等 docker compose ps 显示 healthy。
+
 
 ============================================================
 十二、面试问答速查
@@ -1192,8 +1205,153 @@ Q10 什么是依赖注入？
 
 
 ============================================================
+十四、从 H2 迁移到 MySQL（Profile / Docker / 连接池）
+============================================================
+
+【14.1 为什么要换】
+  H2 是"学习/测试库"的印象；真实项目用 MySQL / PostgreSQL。
+  换库也能再次验证"分层的价值"—— 这次只改了配置和依赖，
+  OrderController / OrderService / Order / OrderStatus 一行没动。
+
+【14.2 要改的东西（比想象的少）】
+  pom.xml                  加 mysql-connector-j（版本由 Spring Boot 父 POM 管理，不用写 version）
+  application.properties   数据源 URL / 驱动 / 账号
+  （schema.sql 不用改，见 14.5）
+
+  驱动依赖用 <scope>runtime</scope>：代码里从不 import 任何 MySQL 的类，
+  驱动是运行时由 JDBC 按 driver-class-name 反射加载的。
+
+【14.3 Profile：多环境配置】
+  问题：开发要连 MySQL，测试要用内存库，不能改来改去。
+
+  Spring Boot 的约定：
+      application.properties          公共配置（所有环境生效）
+      application-<profile>.properties 该 profile 专属配置
+      激活方式：mvn spring-boot:run -Dspring-boot.run.profiles=h2
+
+  ★ 优先级：profile 专属文件 > 公共文件（同名 key 以 profile 为准）
+    —— 所以 application-h2.properties 里写同名 key 就能"覆盖"掉 MySQL 的连接信息。
+
+  本项目三个配置文件的职责：
+      application.properties            公共 + 默认数据源 = MySQL
+      application-h2.properties         h2 profile：改用 H2 文件库（免 Docker）
+      src/test/resources/application.properties   测试：H2 内存库
+
+  ★ 为什么测试不需要 MySQL？（重要）
+    Maven 把 src/test/resources 复制到 target/test-classes，
+    测试时它在 classpath 上【排在 target/classes 之前】。
+    Spring 按文件名找 application.properties，取到的第一个就是测试那份，
+    主配置里的 MySQL 连接信息在测试中【根本不会被加载】。
+    所以跑测试不需要 Docker、不需要数据库，几秒完成。
+
+【14.4 连接池（HikariCP）】
+  为什么需要？
+    建立数据库连接很贵（TCP 握手 + 认证）。如果每个请求都新建一条，
+    并发一高就把数据库连接数用光（MySQL 默认 max_connections=151）。
+    连接池 = 预先建好一批连接反复复用。
+
+  Spring Boot 自带 HikariCP，加 spring-boot-starter-jdbc 就有，无需额外依赖。
+  常用配置：
+      spring.datasource.hikari.maximum-pool-size=10      池中最多几个连接
+      spring.datasource.hikari.minimum-idle=2            空闲时至少保留几个
+      spring.datasource.hikari.connection-timeout=30000  取连接最长等待（毫秒），超时抛异常
+      spring.datasource.hikari.pool-name=OrderHikariPool 给池取名字，日志里好认
+
+【14.5 schema.sql 要能同时适配 H2 和 MySQL】
+  两边方言有差别，写"交集"就行：
+    - 不要用 MySQL 的反引号 `col`（H2 不认）
+    - 不要用保留字做列名
+    - BIGINT AUTO_INCREMENT PRIMARY KEY / DECIMAL(12,2) / VARCHAR(n) —— 两边都支持
+  这样一份 schema.sql 就能同时服务 MySQL 与 H2。
+
+【14.6 MySQL 连接 URL 的参数（每个都有原因）】
+  jdbc:mysql://localhost:3306/orderdb
+      ?useUnicode=true&characterEncoding=utf8   UTF-8 传输，中文不乱码
+      &serverTimezone=Asia/Shanghai             明确时区，否则驱动可能报错
+      &useSSL=false                             本地开发不走 SSL（生产要开）
+      &allowPublicKeyRetrieval=true             MySQL 8 默认 caching_sha2_password 插件，
+                                                非 SSL 连接下需要允许取公钥才能握手成功
+
+【14.7 Docker Compose：一键起数据库】
+  为什么用 Compose？
+    不用在每台机器上手动装 MySQL、手动建库建账号；
+    一份 docker-compose.yml 描述环境，换机器 / 给同事 / 上 CI 都一样。
+
+  services:
+    mysql:
+      image: mysql:8.4
+      environment:
+        MYSQL_ROOT_PASSWORD: root123     # root 仅管理用
+        MYSQL_DATABASE: orderdb          # 首次启动自动建库
+        MYSQL_USER: order                # 自动建应用账号
+        MYSQL_PASSWORD: order123
+      ports: ["3306:3306"]               # 宿主机:容器
+      volumes: [mysql-data:/var/lib/mysql]   # 具名卷：容器删了数据还在
+      healthcheck:
+        test: ["CMD","mysqladmin","ping","-h","127.0.0.1","-u","root","-proot123"]
+        interval: 5s
+        retries: 20
+        start_period: 30s
+  volumes:
+    mysql-data:
+
+  ★ 健康检查（healthcheck）为什么必要？
+    容器"起来了"不等于数据库"能用了"—— MySQL 首次启动要初始化几十秒，
+    这期间连接会失败。healthcheck 让 docker 知道什么时候真正可用
+    （docker compose ps 会显示 healthy）。
+
+  ★ 具名数据卷（volumes）为什么重要？
+    不写 volumes 的话，docker compose down 时容器里的数据一起没了。
+    写了具名卷，容器删了数据还在，下次 up 又挂回来。
+    想彻底清空数据：docker compose down -v
+
+  ★ 常用命令：
+    docker compose up -d         启动（后台）
+    docker compose ps            看状态（应有 healthy）
+    docker compose logs -f mysql 看日志
+    docker compose stop          停止（保留数据）
+    docker compose down          停并删容器（保留数据卷）
+    docker compose down -v       连数据卷一起删（清空数据）
+
+  ★ 不要写 version: '3' —— Compose V2 已废弃该字段，写了会告警。
+
+  ★ 安全提醒：这些明文口令只是【开发环境】用。
+    生产环境要把口令放到环境变量 / 配置中心，绝不能进代码库。
+
+【14.8 ★★ 踩到的坑：.properties 文件不支持行尾注释！】
+
+  我写了这样的配置，结果应用启动直接崩：
+
+      spring.datasource.hikari.connection-timeout=30000  # 取连接的最长等待时间
+
+  报错：
+      Failed to bind properties under 'spring.datasource.hikari.connection-timeout' to long:
+      Value: "30000  # 取连接的最长等待时间"
+
+  ★ 原因：.properties 格式里，# 或 ! 【只有出现在行首】才是注释。
+    写在 = 后面的会被当成【值的一部分】。于是 "30000  # 说明文字" 转换 long 失败。
+
+  ★ 正确写法：注释单独占一行
+
+      # 取连接的最长等待时间（毫秒）
+      spring.datasource.hikari.connection-timeout=30000
+
+  ★ 这也再次说明：改完一定要【真的启动一次】。
+    光看配置文件"感觉对"，是发现不了这类问题的。
+
+【14.9 迁移的排查思路（这次就是这么定位的）】
+  启动报错时，从报错内容能判断卡在哪一步：
+    "Communications link failure"        -> TCP/端口/防火墙 不通
+    "Access denied for user 'x'@'y'"     -> 已连上 MySQL，只是账号/密码不对
+    "Unknown database 'xxx'"             -> 账号通了，但库不存在
+  本项目启动时得到的是 "Access denied"，
+  说明驱动、地址、端口、连接池【全都对】，只差建库建账号。
+
+
+============================================================
 【学习历程回顾】
 ============================================================
+
   Step 1  OrderStatus.java      枚举，类型安全的状态取值
   Step 2  Order.java            封装、final、getter/setter、toString
   Step 3  OrderRepository.java  Map 当数据库、防御性拷贝、方法签名跟调用方走
@@ -1213,6 +1371,7 @@ Q10 什么是依赖注入？
                                 全局异常兜底，8 条错误路径格式统一
   Step 14 日志与 CI               SLF4J 分级日志；GitHub Actions 自动构建与测试
   Step 15 BigDecimal 与分页       金额精度（DECIMAL(12,2)）；LIMIT/OFFSET 真分页 + 参数上限
+  Step 16 迁移到 MySQL            Profile 多环境、HikariCP 连接池、Docker Compose 起库
 
 ============================================================
   笔记结束。卡住的时候先翻"常见坑清单"，再去"面试问答"自测。

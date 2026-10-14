@@ -12,7 +12,7 @@
 - **支付订单**：仅允许「待支付」状态的订单支付
 - **取消订单**：仅允许「待支付」状态的订单取消
 - **金额统计**：按订单状态汇总总金额
-- **数据持久化**：使用 H2 文件数据库，服务重启后数据不丢失
+- **数据持久化**：使用 MySQL 数据库，服务重启后数据不丢失
 - **并发安全**：通过数据库原子条件更新保证同一笔订单不会被重复支付
 - **统一异常处理**：所有错误响应统一为 `{"error": "..."}` 格式，并保留语义化的 HTTP 状态码
   （400 参数不合法 / 404 资源不存在 / 405 方法不支持 / 409 状态冲突 / 415 媒体类型不支持 / 500 服务器内部错误）。
@@ -28,9 +28,12 @@
 | Maven | 3.9+ | 构建与依赖管理 |
 | Spring Boot | 3.5.16 | 应用框架、依赖注入、Web 容器 |
 | Spring JDBC | JdbcTemplate | 数据库访问 |
-| H2 Database | 2.3 | 内嵌式关系数据库（文件模式） |
+| MySQL | 8.x | 主数据库（生产形态） |
+| HikariCP | Spring Boot 自带 | 数据库连接池 |
+| H2 Database | 2.3 | 测试数据库 + 免 Docker 的备用运行方式 |
 | JUnit 5 | 5.11+ | 单元测试 |
 | springdoc-openapi | 2.8.17 | Swagger UI 接口文档 |
+| Docker Compose | — | 一键启动 MySQL 开发环境 |
 
 ## 架构设计
 
@@ -64,8 +67,8 @@
 ```
 
 **设计要点**：业务规则全部集中在 `OrderService`，`OrderController` 中没有任何业务判断逻辑。
-因此更换数据存储方式时，只需修改 `OrderRepository` 一层 —— 本项目从内存 `Map` 迁移到 H2 数据库时，
-`OrderController`、`Order`、`OrderStatus` 均无需修改。
+因此更换数据存储方式时，只需修改 `OrderRepository` 一层 —— 本项目从内存 `Map` 迁移到 H2、
+再从 H2 迁移到 MySQL 时，`OrderController`、`Order`、`OrderStatus` 均无需修改。
 
 **对外契约与内部模型分离**：接口层不直接暴露 `Order` 实体，而是使用 `dto` 包中的
 `CreateOrderRequest`（入参）与 `OrderResponse`（出参）。这样实体的内部结构可以自由演化，
@@ -77,8 +80,33 @@
 
 - JDK 21 或更高版本
 - Maven 3.9 或更高版本
+- Docker（用于一键启动 MySQL；也可改用本机已安装的 MySQL，或使用 `h2` profile 免数据库运行）
 
-### 启动服务
+### 第 1 步：启动数据库
+
+```bash
+docker compose up -d
+```
+
+确认状态为 `healthy`（首次启动 MySQL 初始化需要几十秒）：
+
+```bash
+docker compose ps
+```
+
+数据库连接信息（已在 `application.properties` 中配置好）：
+
+| 项 | 值 |
+|---|---|
+| host / port | `localhost:3306` |
+| database | `orderdb` |
+| 应用账号 | `order` / `order123` |
+| root 账号 | `root` / `root123`（仅用于管理，应用不使用） |
+
+> 这些是**开发环境的明文口令**，仅用于本地/演示。生产环境应通过环境变量或配置中心注入，
+> 不能写死在代码库里。
+
+### 第 2 步：启动服务
 
 ```bash
 mvn spring-boot:run
@@ -86,11 +114,23 @@ mvn spring-boot:run
 
 启动成功后，服务监听 `http://localhost:8080`。
 
+**不使用 Docker 时**，可用 H2 备用配置运行（数据存在本地 `data/` 目录）：
+
+```bash
+mvn spring-boot:run -Dspring-boot.run.profiles=h2
+```
+
+> 启动应用不需要预先建表：`spring.sql.init.mode=always` 会在每次启动时执行
+> `schema.sql`（脚本用 `CREATE TABLE IF NOT EXISTS`，可重复执行）。
+
 ### 运行测试
 
 ```bash
 mvn test
 ```
+
+测试使用 H2 **内存数据库**（`jdbc:h2:mem:testdb`），**不需要 MySQL、也不需要 Docker**，
+几秒钟即可跑完，且不会污染开发数据。
 
 ### 构建可执行 JAR
 
@@ -104,15 +144,25 @@ java -jar target/order-app-1.0.0.jar
 | 地址 | 说明 |
 |---|---|
 | http://localhost:8080/swagger-ui.html | Swagger UI 接口文档（可在浏览器中直接调用接口） |
-| http://localhost:8080/h2-console | H2 数据库控制台（连接信息见下方） |
+| http://localhost:8080/h2-console | H2 数据库控制台（**仅 `h2` profile 下可用**） |
 
-H2 控制台登录信息：
+H2 控制台登录信息（使用 `h2` profile 时）：
 
 | 字段 | 值 |
 |---|---|
 | JDBC URL | `jdbc:h2:file:./data/orderdb` |
 | User Name | `sa` |
 | Password | （留空） |
+
+### 环境配置（Profile）
+
+配置分为公共部分与 profile 专属部分，**profile 专属文件中的同名 key 优先生效**：
+
+| 文件 | 作用 |
+|---|---|
+| `application.properties` | 公共配置 + 默认数据源（MySQL） |
+| `application-h2.properties` | `h2` profile：改用 H2 文件数据库，无需 Docker |
+| `src/test/resources/application.properties` | 测试专用：H2 内存库（在 classpath 上优先于主配置，因此测试完全不受 MySQL 影响） |
 
 ## API 接口
 
@@ -246,6 +296,7 @@ order-app/
 ├── pom.xml                                  Maven 配置
 ├── README.md
 ├── .gitignore
+├── docker-compose.yml                       MySQL 开发环境（一键启动）
 ├── .github/workflows/ci.yml                 CI：自动构建与测试
 └── src/
     ├── main/
@@ -262,14 +313,15 @@ order-app/
     │   │       ├── OrderResponse.java        出参 DTO
     │   │       └── PageResponse.java         通用分页结构
     │   └── resources/
-    │       ├── application.properties       数据库与应用配置
-    │       └── schema.sql                   建表脚本
+    │       ├── application.properties       公共配置 + 默认数据源（MySQL）
+    │       ├── application-h2.properties    h2 profile：免 Docker 的备用数据源
+    │       └── schema.sql                   建表脚本（MySQL / H2 通用）
     └── test/
         ├── java/com/example/order/
         │   ├── OrderServiceTest.java        业务层测试（含并发测试）
         │   └── OrderControllerTest.java     接口层测试（MockMvc）
         └── resources/
-            └── application.properties       测试专用配置（内存数据库）
+            └── application.properties       测试专用配置（H2 内存库）
 ```
 
 ## 数据库设计
@@ -287,6 +339,10 @@ CREATE TABLE orders (
 
 - `seq` 自增主键用于保证「查询全部」时的插入顺序（数据库的查询结果默认不保证顺序）
 - `id` 上的 `UNIQUE` 约束与业务层的重复校验形成**双重保障**：业务层负责给出友好的错误提示，数据库层负责保证数据的绝对正确
+- 建表脚本刻意避开了 MySQL 的反引号与保留字，写成 **MySQL 与 H2 都合法**的 SQL，
+  因此两种数据源可共用同一个 `schema.sql`
+- 由 Spring 的 `spring.sql.init.mode=always` 在每次启动时执行（`IF NOT EXISTS` 保证可重复执行）。
+  后续若 schema 需要频繁演进，可引入 **Flyway / Liquibase** 做版本化迁移
 
 ## 测试
 
@@ -358,6 +414,15 @@ mvn test -Dtest=OrderServiceTest#pay_concurrentOnlyOneSucceeds   # 只跑某一�
 
 - **依赖注入**：`OrderService` 与 `OrderRepository` 的依赖均由 Spring 容器注入，而非自行创建，
   从而实现层与层之间的解耦，并便于在测试中替换依赖
+- **多环境配置（Profile）**：默认使用 MySQL，`h2` profile 提供免 Docker 的备用数据源；
+  测试通过 `src/test/resources/application.properties` 覆盖为 H2 内存库 ——
+  由于测试类路径优先，测试**完全不受 MySQL 配置影响**，无需任何外部依赖即可运行
+- **连接池（HikariCP）**：Spring Boot 默认自带。连接池复用连接，
+  避免每次请求都做 TCP 握手与认证；配置了最大连接数、最小空闲连接与获取超时
+- **MySQL 连接参数**：`characterEncoding=utf8` 保证中文不乱码，`serverTimezone` 明确时区，
+  `allowPublicKeyRetrieval=true` 用于 MySQL 8 默认的 `caching_sha2_password` 插件在非 SSL 连接下的握手
+- **容器化数据库**：`docker-compose.yml` 声明 MySQL 服务，含**健康检查**（容器"起来"≠数据库"可用"）、
+  具名数据卷（容器删除后数据仍在）与 utf8mb4 字符集
 - **不可变设计**：订单号与金额使用 `final` 修饰，创建后不可修改；订单号作为数据主键，不可变性尤为重要
 - **分页查询**：列表接口支持 `page` / `size` 参数，由数据库执行 `LIMIT ? OFFSET ?`，
   只取需要的那一页，避免把全表读进内存。分页参数在业务层校验（页码 ≥ 1、每页 1~100），

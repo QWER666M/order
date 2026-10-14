@@ -1,0 +1,49 @@
+# MySQL 8 —— 用 Docker Compose 一键起一个干净、可复现的数据库环境
+#
+# 常用命令（在项目根目录执行）：
+#   docker compose up -d      启动（后台）
+#   docker compose ps         查看状态（State 为 healthy 即可用）
+#   docker compose logs -f    看日志
+#   docker compose stop       停止容器（数据保留在数据卷里）
+#   docker compose down       停止并删除容器（数据仍保留在数据卷里）
+#   docker compose down -v    停止并删除容器【连同数据卷】(数据全部清空，谨慎)
+#
+# 连接信息（与 src/main/resources/application.properties 保持一致）：
+#   host=localhost  port=3306  database=orderdb  user=order  password=order123
+#
+# 说明：这里没有声明 version 字段 —— Compose V2 已废弃它，写了反而会告警。
+
+services:
+  mysql:
+    image: mysql:8.4                  # 8.4 是 LTS 版本
+    container_name: order-mysql
+    restart: unless-stopped
+
+    environment:
+      MYSQL_ROOT_PASSWORD: root123    # root 仅用于管理，应用不要用 root 连库
+      MYSQL_DATABASE: orderdb         # 首次启动自动创建这个库
+      MYSQL_USER: order               # 自动创建应用专用账号
+      MYSQL_PASSWORD: order123        # 该账号的密码
+
+    # 服务端字符集：库/表默认 utf8mb4，能存下中文与 emoji
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+
+    ports:
+      - "3306:3306"                   # 宿主机端口:容器端口
+
+    volumes:
+      - mysql-data:/var/lib/mysql     # 具名数据卷：容器删了数据还在
+
+    # 健康检查：让 Docker 知道"数据库真的能用了"，而不只是"容器起来了"
+    # 容器启动后 MySQL 还要初始化几十秒，期间连接会失败，所以需要这个探针
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-proot123"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+volumes:
+  mysql-data:
