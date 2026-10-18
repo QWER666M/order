@@ -987,6 +987,23 @@
   原因：MySQL 首次启动要初始化几十秒，这期间端口虽在监听但还不接受连接。
   解决：在 docker-compose.yml 里配 healthcheck，等 docker compose ps 显示 healthy。
 
+【15】用 PowerShell 调接口，中文变成 ?? —— 先别怀疑代码
+  现象：注册/建单后，数据库里中文变成字面的 "??"（HEX = 3F3F），
+        接口返回的中文在 PowerShell 里显示成 "è¹æ" 之类的乱码。
+  原因：Windows PowerShell 5.1 的 Invoke-RestMethod 默认不按 UTF-8 处理请求体和响应
+        （按 ASCII / Latin-1），中文在【发送前】就已经变成 ? 了。
+  判断方法（很重要）：
+      用 curl 把 UTF-8 文件作为请求体上传，再查 HEX：
+          SELECT product_name, HEX(product_name) FROM ...;
+      如果 HEX = E88BB9E69E9C（"苹果"的正确 UTF-8 字节）→ 服务端和数据库都没问题，
+      坏在客户端。
+  解决：
+      curl.exe -X POST ... -H "Content-Type: application/json; charset=UTF-8" --data-binary "@body.json"
+      或用 PowerShell 7（默认 UTF-8）
+      或 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+  ★ 教训：验证结果反常时，先排除"测试工具/客户端"，再怀疑代码。
+    这次如果直接去改 application.properties 的字符集，就是在修一个不存在的问题。
+
 
 ============================================================
 十二、面试问答速查

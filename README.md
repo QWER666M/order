@@ -112,6 +112,37 @@ docker compose ps
 > 这些是**开发环境的明文口令**，仅用于本地/演示。生产环境应通过环境变量或配置中心注入，
 > 不能写死在代码库里。
 
+#### 使用本机已安装的 MySQL（不用 Docker）
+
+先把库和账号建好 —— 用 root 执行仓库里的初始化脚本：
+
+```bash
+mysql -u root -p < db/init-mysql.sql
+```
+
+或者在 **MySQL Workbench** 中打开 `db/init-mysql.sql`，用 root 连接后点 ⚡ 执行。
+
+脚本会创建 `orderdb` 库、创建应用账号 `order`，并只授予该库的权限。
+**表结构不用手动建** —— 应用启动时 `schema.sql` 会自动执行。
+
+#### 数据库结构变更后如何重建
+
+`schema.sql` 用的是 `CREATE TABLE IF NOT EXISTS`，**它不会修改已存在的表**。
+所以当表结构变化（例如新增 `owner_id`、新增 `users` / `order_items` 表）时，需要重建库：
+
+| 环境 | 做法 |
+|---|---|
+| **H2（`h2` profile）** | 停止应用 → 删除 `data/` 目录 → 重新启动即可 |
+| **MySQL** | 执行 `db/init-mysql.sql`（**会清空数据**） |
+| **MySQL（保留数据）** | 手动迁移，例如 `ALTER TABLE orders ADD COLUMN owner_id VARCHAR(64) NULL;` |
+
+典型症状：启动或调用接口时报 `Column "OWNER_ID" not found` / `Table "USERS" not found` —— 说明库还是旧结构。
+
+> **用 PowerShell 测试中文时注意**：Windows PowerShell 5.1 的 `Invoke-RestMethod`
+> 不按 UTF-8 处理请求体，中文会先变成 `?` 再发出去（数据库里看到 `3F3F`）。
+> 这不是服务端问题 —— 用 `curl --data-binary "@utf8.json"` 上传即可正常。
+> 排查方法：`SELECT HEX(product_name)`，若为 `E88BB9E69E9C`（"苹果"）说明存储正确。
+
 ### 第 2 步：启动服务
 
 ```bash
@@ -380,6 +411,7 @@ order-app/
 ├── README.md
 ├── .gitignore
 ├── docker-compose.yml                       MySQL 开发环境（一键启动）
+├── db/init-mysql.sql                        重建 MySQL 库与账号（root 执行）
 ├── .github/workflows/ci.yml                 CI：自动构建与测试
 └── src/
     ├── main/
