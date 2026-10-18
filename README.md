@@ -797,7 +797,7 @@ mvn clean verify
   但**不能代付** —— 资金操作必须由订单所属人发起。权限是"能对谁做"，不是"能跳过业务规则"
 - **容器化（多阶段构建）**：`Dockerfile` 分两个阶段 —— 用 `maven` 镜像编译打包，
   再把**一个 jar** 复制进 `eclipse-temurin:21-jre` 运行。最终镜像不含 Maven、依赖缓存与源码，
-  体积从 600MB+ 降到约 200MB，也缩小了攻击面
+  也缩小了攻击面 —— CI 实测镜像 **352MB**（若直接用 maven 镜像做运行环境则在 700MB 以上）
 - **构建缓存分层**：先 `COPY pom.xml` + `dependency:go-offline`，再 `COPY src`。
   Docker 每一层都会被缓存，而"输入变了之后的层全部失效"；这样改代码不会重新下载依赖
 - **容器安全与优雅停机**：用非 root 用户（`USER appuser`）运行；
