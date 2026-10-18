@@ -1,6 +1,7 @@
 package com.example.order;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -40,6 +41,8 @@ class OrderControllerTest {
 
     @BeforeEach
     void setUp() {
+        // ★ 顺序不能反：order_items 有外键指向 orders，必须先删明细，再删订单
+        jdbc.update("DELETE FROM order_items");
         jdbc.update("DELETE FROM orders");
     }
 
@@ -245,4 +248,50 @@ class OrderControllerTest {
                 .andExpect(jsonPath("$.unpaid").value(200.00))
                 .andExpect(jsonPath("$.cancelled").value(50.00));
     }
-}
+
+    // ================= 订单明细（1:N）=================
+
+    /** 带明细创建：返回的是服务端算出的总价 23.50，而不是客户端传的任何值 */
+    @Test
+    void create_withItems_returns201AndComputedAmount() throws Exception {
+        mockMvc.perform(post("/orders")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"id":"A001","amount":1.00,"items":[
+                                  {"productName":"苹果","price":10.00,"quantity":2},
+                                  {"productName":"香蕉","price":3.50,"quantity":1}
+                                ]}
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.id").value("A001"))
+                .andExpect(jsonPath("$.amount").value(23.50));
+    }
+
+    /** 详情接口返回明细（含服务端计算的小计） */
+    @Test
+    void getOne_returnsItems() throws Exception {
+        service.createOrder("A001", null, List.of(
+                new OrderItem("苹果", new BigDecimal("10.00"), 2),
+                new OrderItem("香蕉", new BigDecimal("3.50"), 1)));
+
+        mockMvc.perform(get("/orders/A001"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.amount").value(23.50))
+                .andExpect(jsonPath("$.items.length()").value(2))
+                .andExpect(jsonPath("$.items[0].productName").value("苹果"))
+                .andExpect(jsonPath("$.items[0].quantity").value(2))
+                .andExpect(jsonPath("$.items[0].subtotal").value(20.00))
+                .andExpect(jsonPath("$.items[1].subtotal").value(3.50));
+    }
+
+    /** 列表接口【不】返回明细 —— 避免 N+1 查询 */
+    @Test
+    void list_doesNotIncludeItems() throws Exception {
+        service.createOrder("A001", null, List.of(
+                new OrderItem("苹果", new BigDecimal("10.00"), 2)));
+
+        mockMvc.perform(get("/orders"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].id").value("A001"))
+                .andExpect(jsonPath("$.items[0].items").doesNotExist());
+    }}

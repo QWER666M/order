@@ -18,6 +18,7 @@
   十二、面试问答速查
   十三、并发安全（"先查后改"陷阱）
   十四、从 H2 迁移到 MySQL（Profile / Docker / 连接池）
+  十五、订单明细（1:N）与事务
 
 
 ============================================================
@@ -1390,6 +1391,135 @@ Q10 什么是依赖注入？
 
 
 ============================================================
+十五、订单明细（1:N）与事务
+============================================================
+
+【15.1 为什么要做 1:N】
+  之前的订单只有一个"总金额"，等于"一笔订单 = 一个数"。
+  真实订单是"一笔订单 = 若干商品"，所以拆成两张表：
+
+      orders        1  ----  N  order_items
+      (订单)                     (明细：商品名/单价/数量)
+
+  这叫【一对多关系】。数据库里用【外键】表达：
+      order_items.order_id -> orders.id
+
+【15.2 建表要点】
+  CREATE TABLE IF NOT EXISTS order_items (
+      seq          BIGINT AUTO_INCREMENT PRIMARY KEY,
+      order_id     VARCHAR(64)   NOT NULL,
+      product_name VARCHAR(128)  NOT NULL,
+      price        DECIMAL(12,2) NOT NULL,
+      quantity     INT           NOT NULL,
+      CONSTRAINT fk_order_items_order
+          FOREIGN KEY (order_id) REFERENCES orders (id)
+  );
+
+  ★ 三个细节：
+    1) 外键保证"明细一定属于一张存在的订单"，插入不存在的订单号会被拒绝。
+    2) 外键列【自动建索引】：MySQL 和 H2 都会为外键列建索引，
+       所以按 order_id 查明细不会全表扫描，不需要手写 CREATE INDEX
+       （而且 MySQL 8 不支持 CREATE INDEX IF NOT EXISTS，写了反而两边不通用）。
+    3) 被外键引用的列必须有唯一约束 —— orders.id 上的 UNIQUE 正好满足。
+
+  ★ 删除顺序：有外键时，必须先删明细、再删订单。
+    测试里清库就踩到了：DELETE FROM orders 会因外键约束失败。
+
+【15.3 ★★ 事务：为什么这次真的需要 @Transactional】
+
+  创建订单 = 写两张表：
+      1. INSERT INTO orders ...
+      2. INSERT INTO order_items ...（可能多条）
+
+  如果第 1 步成功、第 2 步失败（比如商品名太长被数据库拒绝），
+  数据库里就会留下一张【没有明细的订单】—— 金额 15.00，打开却没有任何商品。
+  这种"半截数据"叫脏数据，比直接失败还糟糕，因为没人会注意到。
+
+  @Transactional 的语义：把方法内的所有写操作看成【一个整体】，
+  方法抛出运行时异常 -> 全部回滚，数据回到方法执行前的样子。
+
+      @Transactional
+      public Order createOrder(String id, BigDecimal amount, List<OrderItem> items) { ... }
+
+  ★ 只有【运行时异常】（RuntimeException / Error）默认触发回滚；
+    受检异常（checked exception）默认【不回滚】—— 需要写 @Transactional(rollbackFor = Exception.class)。
+
+  ★ 实测验证（本项目真的演示过）：
+    把 @Transactional 注释掉再跑回滚测试，测试立刻失败：
+        expected: <null>
+        but was:  <A001 | 金额 15.00 | 状态 UNPAID>
+    订单留下了、明细回滚了 —— 正是脏数据。
+    加回注解后测试通过。这比"看文档记住"要牢得多。
+
+【15.4 ★ @Transactional 的经典坑：自调用失效】
+
+  Spring 的事务是靠【代理对象】实现的：外部调用 -> 代理 -> 开启事务 -> 真实方法。
+  如果在同一个类里直接调用另一个方法：
+
+      public Order a() { return b(); }        // 直接 new 出来的 this.b()，没经过代理
+      @Transactional public Order b() { ... } // b 上的事务【不生效】
+
+  解决：
+    - 两个入口方法都加注解（本项目就是这么做的）
+    - 或者把 B 挪到另一个 Bean 里
+    - 或者注入自己（不推荐）
+
+  ★ 另外：@Transactional 加在 private 方法上无效（代理无法拦截）。
+
+【15.5 ★★ 金额必须由服务端计算（安全）】
+
+  客户端能传的只有：商品名、单价、数量。
+  小计和总价一律由服务端算：
+
+      subtotal = price × quantity
+      total    = Σ subtotal
+
+  为什么？如果让客户端传"总价"，客户端把 1000 元改成 1 元就能付款成功。
+  这和"前端校验不能代替后端校验"是同一个道理：
+  凡是【客户端能改的数据】，都不能直接当成事实。
+
+  本项目实测：请求里同时传 amount=1.00 和两条明细，
+  返回的金额仍然是服务端算出的 23.50。
+
+【15.6 ★ N+1 查询问题：列表为什么不返回明细】
+
+  假设列表接口返回 10 条订单，且每条都要带明细：
+      1 次查询取订单 + 10 次查询取明细 = 11 次数据库往返
+  这就是 N+1 问题（1 次主查询 + N 次从查询），数据量大时会把数据库拖垮。
+
+  本项目的做法：
+      GET /orders        -> OrderResponse（不含明细）
+      GET /orders/{id}   -> OrderDetailResponse（含明细，只查 1 次）
+
+  ★ 面试延伸：如果确实需要在列表里带关联数据，可以用
+    联表查询（JOIN）、批量查询（IN 一次查完再在内存里分组）、
+    或 ORM 的 fetch join / @EntityGraph 来避免 N+1。
+
+【15.7 实体为什么不在 Order 里放 List<OrderItem>】
+  三个原因：
+    1) 会诱发 N+1（见 15.6）
+    2) 明细只在详情页需要，按需查询更省资源
+    3) 实体互相持有容易形成循环引用，JSON 序列化时会无限递归
+
+  需要明细时，由 Service 显式调用 repository.findItems(orderId)。
+
+【15.8 批量插入：batchUpdate】
+  jdbc.batchUpdate("INSERT INTO order_items (...) VALUES (?,?,?,?)", List<Object[]>);
+
+  为什么不用 for 循环单条 insert？
+    循环 = n 次"应用 -> 数据库"网络往返；batchUpdate 会攒成一批发送，
+    由驱动/数据库一次处理，明细多时差距非常明显。
+
+【15.9 DTO 的分裂：列表 DTO vs 详情 DTO】
+  OrderResponse       : id / amount / status
+  OrderDetailResponse : id / amount / status / items[]
+
+  这不是重复代码，而是【按场景裁剪契约】：
+  列表接口不承诺返回明细，详情接口才承诺。
+  好处是列表性能可控，而且以后详情再加字段不会影响列表接口。
+
+
+============================================================
 【学习历程回顾】
 ============================================================
 
@@ -1414,6 +1544,8 @@ Q10 什么是依赖注入？
   Step 15 BigDecimal 与分页       金额精度（DECIMAL(12,2)）；LIMIT/OFFSET 真分页 + 参数上限
   Step 16 迁移到 MySQL            Profile 多环境、HikariCP 连接池、Docker Compose 起库
                                   ★ 已用独立的临时 MySQL 实例完成端到端验证
+  Step 17 订单明细与事务          1:N 外键、@Transactional 回滚、服务端计算金额、避免 N+1
+                                  ★ 实测：去掉 @Transactional 后立刻出现"无明细的半截订单"
 
 ============================================================
   笔记结束。卡住的时候先翻"常见坑清单"，再去"面试问答"自测。

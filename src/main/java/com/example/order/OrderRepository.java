@@ -24,6 +24,13 @@ public class OrderRepository {
             OrderStatus.valueOf(rs.getString("status"))
     );
 
+    /** 把明细表的一行，变成一个 OrderItem 对象 */
+    private static final RowMapper<OrderItem> TO_ITEM = (rs, rowNum) -> new OrderItem(
+            rs.getString("product_name"),
+            rs.getBigDecimal("price"),
+            rs.getInt("quantity")
+    );
+
     private final JdbcTemplate jdbc;
 
     // Spring 会自动把 JdbcTemplate 递进来（它由 spring-boot-starter-jdbc 提供）
@@ -90,5 +97,39 @@ public class OrderRepository {
         Integer count = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM orders WHERE id = ?", Integer.class, id);
         return count != null && count > 0;
+    }
+
+    /**
+     * 批量插入订单明细。
+     *
+     * ★ 为什么用 batchUpdate 而不是循环 update？
+     *   循环调用 = n 次"应用 → 数据库"的网络往返；batchUpdate 会攒成一批发送，
+     *   由驱动/数据库一次处理，明细多时差距很明显。
+     *   参数用 List<Object[]>：每个数组就是一条 SQL 的 ? 参数。
+     */
+    public void addItems(String orderId, List<OrderItem> items) {
+        List<Object[]> args = items.stream()
+                .map(item -> new Object[]{
+                        orderId,
+                        item.getProductName(),
+                        item.getPrice(),
+                        item.getQuantity()
+                })
+                .toList();
+        jdbc.batchUpdate(
+                "INSERT INTO order_items (order_id, product_name, price, quantity) VALUES (?, ?, ?, ?)",
+                args);
+    }
+
+    /** 按订单号取明细，按插入顺序返回 */
+    public List<OrderItem> findItems(String orderId) {
+        return jdbc.query(
+                "SELECT product_name, price, quantity FROM order_items WHERE order_id = ? ORDER BY seq",
+                TO_ITEM, orderId);
+    }
+
+    /** 删除某张订单的明细（测试清库时用；有外键，必须先删明细再删订单） */
+    public void deleteItems(String orderId) {
+        jdbc.update("DELETE FROM order_items WHERE order_id = ?", orderId);
     }
 }

@@ -8,6 +8,7 @@
 ## 功能特性
 
 - **创建订单**：自动校验订单号非空、不重复，金额必须大于 0
+- **订单明细**：一个订单可包含多条商品明细，总价由**服务端**按「单价 × 数量」计算
 - **查询订单**：支持按订单号查询单笔、分页查询订单列表
 - **支付订单**：仅允许「待支付」状态的订单支付
 - **取消订单**：仅允许「待支付」状态的订单取消
@@ -169,31 +170,67 @@ H2 控制台登录信息（使用 `h2` profile 时）：
 | 方法 | 路径 | 说明 | 成功 | 失败 |
 |---|---|---|---|---|
 | GET | `/orders?page=1&size=10` | 分页查询订单列表 | 200 | 400 参数不合法 |
-| POST | `/orders` | 创建订单 | 201 | 400 参数不合法 |
-| GET | `/orders/{id}` | 按订单号查询 | 200 | 404 订单不存在 |
+| POST | `/orders` | 创建订单（可带明细） | 201 | 400 参数不合法 |
+| GET | `/orders/{id}` | 查询订单详情（含明细） | 200 | 404 订单不存在 |
 | POST | `/orders/{id}/pay` | 支付订单 | 200 | 409 状态冲突 |
 | POST | `/orders/{id}/cancel` | 取消订单 | 200 | 409 状态冲突 |
 | GET | `/orders/stats` | 按状态统计金额 | 200 | — |
 
 ### 请求示例
 
-创建订单：
+**方式一：带明细创建（推荐）**
 
 ```bash
 curl -X POST http://localhost:8080/orders \
      -H "Content-Type: application/json" \
-     -d '{"id":"A001","amount":100.00}'
+     -d '{
+           "id": "A001",
+           "items": [
+             { "productName": "苹果", "price": 10.00, "quantity": 2 },
+             { "productName": "香蕉", "price": 3.50,  "quantity": 1 }
+           ]
+         }'
 ```
 
-响应：
+响应（总价由**服务端**计算：10.00×2 + 3.50×1 = 23.50）：
 
 ```json
 {
   "id": "A001",
-  "amount": 100.00,
+  "amount": 23.50,
   "status": "UNPAID"
 }
 ```
+
+> 即使请求体里同时传了 `"amount": 1.00`，也会被忽略 —— **金额不能由客户端决定**。
+
+**方式二：只给总额（兼容旧用法）**
+
+```bash
+curl -X POST http://localhost:8080/orders \
+     -H "Content-Type: application/json" \
+     -d '{"id":"A002","amount":100.00}'
+```
+
+**查询订单详情**（含明细与小计）：
+
+```bash
+curl http://localhost:8080/orders/A001
+```
+
+```json
+{
+  "id": "A001",
+  "amount": 23.50,
+  "status": "UNPAID",
+  "items": [
+    { "productName": "苹果", "price": 10.00, "quantity": 2, "subtotal": 20.00 },
+    { "productName": "香蕉", "price": 3.50,  "quantity": 1, "subtotal": 3.50 }
+  ]
+}
+```
+
+> 列表接口 `GET /orders` **不返回明细** —— 否则一页 10 条订单就要额外查 10 次明细（N+1 查询问题）。
 
 订单号重复时的响应（HTTP 400）：
 
@@ -306,11 +343,15 @@ order-app/
     │   │   ├── OrderService.java            业务层（业务规则）
     │   │   ├── OrderRepository.java         数据层（数据库访问）
     │   │   ├── Order.java                   订单实体（内部模型）
+    │   │   ├── OrderItem.java               订单明细实体（1:N）
     │   │   ├── OrderStatus.java             订单状态枚举
     │   │   ├── ApiExceptionHandler.java     全局异常处理
     │   │   └── dto/
-    │   │       ├── CreateOrderRequest.java   入参 DTO
-    │   │       ├── OrderResponse.java        出参 DTO
+    │   │       ├── CreateOrderRequest.java   创建订单入参（可含 items）
+    │   │       ├── CreateOrderItemRequest.java  单条明细入参
+    │   │       ├── OrderResponse.java        列表用出参（不含明细）
+    │   │       ├── OrderDetailResponse.java  详情用出参（含明细）
+    │   │       ├── OrderItemResponse.java    明细出参（含小计）
     │   │       └── PageResponse.java         通用分页结构
     │   └── resources/
     │       ├── application.properties       公共配置 + 默认数据源（MySQL）
@@ -333,22 +374,35 @@ CREATE TABLE orders (
     amount DECIMAL(12,2) NOT NULL,              -- 金额：DECIMAL(总位数, 小数位数)，精确十进制
     status VARCHAR(16) NOT NULL                -- 状态
 );
+
+CREATE TABLE order_items (
+    seq          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    order_id     VARCHAR(64)   NOT NULL,
+    product_name VARCHAR(128)  NOT NULL,
+    price        DECIMAL(12,2) NOT NULL,
+    quantity     INT           NOT NULL,
+    CONSTRAINT fk_order_items_order
+        FOREIGN KEY (order_id) REFERENCES orders (id)
+);
 ```
 
 设计说明：
 
 - `seq` 自增主键用于保证「查询全部」时的插入顺序（数据库的查询结果默认不保证顺序）
 - `id` 上的 `UNIQUE` 约束与业务层的重复校验形成**双重保障**：业务层负责给出友好的错误提示，数据库层负责保证数据的绝对正确
+- `order_items.order_id` 是**外键**，保证"明细一定属于一张存在的订单"；
+  外键列由 MySQL / H2 **自动建立索引**，按订单号查明细不会全表扫描
 - 建表脚本刻意避开了 MySQL 的反引号与保留字，写成 **MySQL 与 H2 都合法**的 SQL，
   因此两种数据源可共用同一个 `schema.sql`
 - 由 Spring 的 `spring.sql.init.mode=always` 在每次启动时执行（`IF NOT EXISTS` 保证可重复执行）。
   后续若 schema 需要频繁演进，可引入 **Flyway / Liquibase** 做版本化迁移
+- 测试清库时**必须先删 `order_items` 再删 `orders`**，否则外键约束会阻止删除
 
 ## 测试
 
-共 **32 个测试**，分为两层：
+共 **39 个测试**，分为两层：
 
-### 业务层测试 `OrderServiceTest`（14 个）
+### 业务层测试 `OrderServiceTest`（18 个）
 
 直接调用 `OrderService` 的 Java 方法，验证业务规则与并发安全：
 
@@ -365,11 +419,15 @@ CREATE TABLE orders (
 | `sumAmount_sumsByStatus` | 按状态汇总金额，小数加法精确（10.10 + 0.70 = 10.80） |
 | `listOrders_pagination` | 分页正确：页码偏移、总数、总页数、超范围返回空页 |
 | `listOrders_invalidPagingParams_throws` | 页码 < 1 或每页条数越界时抛出异常 |
+| `createOrder_withItems_computesTotalOnServer` | 带明细创建，总价由服务端按「单价×数量」计算 |
+| `createOrder_itemsTakePrecedenceOverClientAmount` | 客户端传的 `amount` 不能覆盖服务端计算的金额 |
+| `createOrder_invalidItem_throws` | 商品名为空 / 单价 ≤ 0 / 数量 ≤ 0 均被拒绝 |
+| **`createOrder_itemInsertFails_rollsBackOrder`** | **事务回滚**：明细写入失败时，订单本身也被撤销 |
 | `pay_concurrentOnlyOneSucceeds` | 20 线程并发支付同一订单，**仅 1 个成功** |
 | `cancel_concurrentOnlyOneSucceeds` | 20 线程并发取消同一订单，**仅 1 个成功** |
 | `createOrder_concurrentSameId_onlyOneSucceeds` | 20 线程并发创建同一订单号，**仅 1 个成功，其余为友好业务错误（不产生 500）** |
 
-### 接口层测试 `OrderControllerTest`（18 个）
+### 接口层测试 `OrderControllerTest`（21 个）
 
 使用 `MockMvc` 模拟 HTTP 请求，验证**状态码、JSON 字段名、错误格式与 DTO 白名单**：
 
@@ -387,6 +445,9 @@ CREATE TABLE orders (
 | `list_secondPage_returnsRemainingItems` | 第 2 页返回剩余数据（验证分页偏移正确） |
 | `list_pageLessThanOne_returns400` / `list_sizeTooLarge_returns400` | 分页参数越界返回 400 |
 | `list_sizeNotANumber_returns400` | 非数字参数由框架拦截，同样返回统一错误格式 |
+| `create_withItems_returns201AndComputedAmount` | 带明细创建返回 201，金额为服务端算出的 23.50 |
+| `getOne_returnsItems` | 详情接口返回明细及服务端计算的小计 |
+| `list_doesNotIncludeItems` | 列表接口不返回明细（避免 N+1 查询） |
 | `pay_success_returns200` | 支付成功返回 200 |
 | `pay_alreadyPaid_returns409` / `pay_orderNotFound_returns409` | 状态冲突返回 409 |
 | `cancel_success_returns200` | 取消成功返回 200 |
@@ -429,6 +490,15 @@ mvn test -Dtest=OrderServiceTest#pay_concurrentOnlyOneSucceeds   # 只跑某一�
   并对 `size` 设上限，防止客户端用超大 size 变相拉走全表。
   返回结构为通用的 `PageResponse<T>`（items / total / page / size / totalPages），
   并通过 `map()` 把业务对象整体转换为对外 DTO
+- **订单明细（1:N）与事务**：订单与明细分两张表。创建订单需要写两张表，
+  用 `@Transactional` 保证原子性 —— 明细写入失败时，已插入的订单会一起回滚，
+  不会留下"没有明细的半截订单"。实测：去掉注解后该测试立刻失败，
+  订单 `A001 | 金额 15.00` 残留但明细为空
+- **金额由服务端计算**：客户端只能传「商品名 / 单价 / 数量」，小计与总价一律由服务端算，
+  请求体里即使带了 `amount` 也会被忽略 —— 否则客户端可以把 1000 元改成 1 元
+- **避免 N+1 查询**：列表接口返回 `OrderResponse`（不含明细），详情接口才返回
+  `OrderDetailResponse`（含明细）。若列表也带明细，一页 10 条就要多查 10 次库
+- **批量插入**：明细使用 `JdbcTemplate.batchUpdate` 一次提交，而不是循环单条插入
 - **金额使用 `BigDecimal`**：货币不能用 `int`（存不了小数）或 `double`（二进制浮点无法精确表示十进制小数，
   `0.1 + 0.2` 会得到 `0.30000000000000004`）。数据库列使用 `DECIMAL(12,2)`，Java 侧全程 `BigDecimal`，
   并在创建时统一归一为两位小数（`setScale(2)`），保证存储与接口返回的金额格式一致。

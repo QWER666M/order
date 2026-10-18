@@ -1,6 +1,7 @@
 package com.example.order;
 
 import com.example.order.dto.CreateOrderRequest;
+import com.example.order.dto.OrderDetailResponse;
 import com.example.order.dto.OrderResponse;
 import com.example.order.dto.PageResponse;
 
@@ -16,6 +17,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -48,22 +50,36 @@ public class OrderController {
         return service.listOrders(page, size).map(OrderResponse::from);
     }
 
-    /** POST /orders —— 创建订单，请求体形如 {"id":"A001","amount":100.00} */
+    /**
+     * POST /orders —— 创建订单。
+     *
+     * 支持两种请求体：
+     *   带明细：{"id":"A001","items":[{"productName":"苹果","price":10.00,"quantity":2}]}
+     *   只给总额：{"id":"A002","amount":100.00}
+     */
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public OrderResponse create(@RequestBody CreateOrderRequest request) {
-        Order created = service.createOrder(request.id(), request.amount());
+        // DTO（对外契约）-> 实体（内部模型）
+        List<OrderItem> items = (request.items() == null)
+                ? List.of()
+                : request.items().stream()
+                        .map(i -> new OrderItem(i.productName(), i.price(), i.quantity()))
+                        .toList();
+
+        Order created = service.createOrder(request.id(), request.amount(), items);
         return OrderResponse.from(created);
     }
 
-    /** GET /orders/{id} —— 按订单号查一笔；查不到返回 404 */
+    /** GET /orders/{id} —— 查询订单详情（含明细）；查不到返回 404 */
     @GetMapping("/{id}")
-    public OrderResponse getOne(@PathVariable String id) {
+    public OrderDetailResponse getOne(@PathVariable String id) {
         Order order = service.findOrder(id);
         if (order == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在：" + id);
         }
-        return OrderResponse.from(order);
+        // 明细只在这一层按需查询：列表接口不会为每条订单都查一次明细（避免 N+1）
+        return OrderDetailResponse.from(order, service.findOrderItems(id));
     }
 
     /** POST /orders/{id}/pay —— 支付；失败返回 409（冲突） */

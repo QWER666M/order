@@ -1,6 +1,7 @@
 package com.example.order;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 
 import com.example.order.dto.PageResponse;
@@ -17,6 +18,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -33,6 +35,8 @@ class OrderServiceTest {
     @BeforeEach
     void setUp() {
         // 每个测试方法跑之前都清空表 —— 保证每个测试都从"空数据库"开始，互不干扰
+        // ★ 顺序不能反：order_items 有外键指向 orders，必须先删明细，再删订单
+        jdbc.update("DELETE FROM order_items");
         jdbc.update("DELETE FROM orders");
     }
 
@@ -310,4 +314,76 @@ class OrderServiceTest {
         assertEquals(0, unexpectedCount.get(), "不应出现数据库异常等意外错误（那会变成 500）");
         assertEquals(threads - 1, duplicateCount.get(), "其余请求应返回友好的业务错误");
     }
-}
+
+    // ================= 订单明细（1:N）与事务 =================
+
+    private static OrderItem item(String name, String price, int qty) {
+        return new OrderItem(name, new BigDecimal(price), qty);
+    }
+
+    /** 总价由服务端按明细计算：10.00*2 + 3.50*1 = 23.50 */
+    @Test
+    void createOrder_withItems_computesTotalOnServer() {
+        Order order = service.createOrder("A001", null, List.of(
+                item("苹果", "10.00", 2),
+                item("香蕉", "3.50", 1)));
+
+        assertAmount("23.50", order.getAmount());
+
+        List<OrderItem> items = service.findOrderItems("A001");
+        assertEquals(2, items.size());
+        assertEquals("苹果", items.get(0).getProductName());
+        assertAmount("20.00", items.get(0).getSubtotal());
+        assertAmount("3.50", items.get(1).getSubtotal());
+    }
+
+    /**
+     * 安全要点：客户端就算传了 amount=1.00，也无法影响总价。
+     * 有明细时一律以服务端计算的金额为准。
+     */
+    @Test
+    void createOrder_itemsTakePrecedenceOverClientAmount() {
+        Order order = service.createOrder("A001", new BigDecimal("1.00"), List.of(
+                item("苹果", "10.00", 2),
+                item("香蕉", "3.50", 1)));
+
+        assertAmount("23.50", order.getAmount());
+    }
+
+    @Test
+    void createOrder_invalidItem_throws() {
+        IllegalArgumentException e1 = assertThrows(IllegalArgumentException.class,
+                () -> service.createOrder("A001", null, List.of(item("  ", "10.00", 1))));
+        assertEquals("商品名称不能为空", e1.getMessage());
+
+        IllegalArgumentException e2 = assertThrows(IllegalArgumentException.class,
+                () -> service.createOrder("A001", null, List.of(item("苹果", "0", 1))));
+        assertEquals("商品单价必须大于 0", e2.getMessage());
+
+        IllegalArgumentException e3 = assertThrows(IllegalArgumentException.class,
+                () -> service.createOrder("A001", null, List.of(item("苹果", "10.00", 0))));
+        assertEquals("商品数量必须大于 0", e3.getMessage());
+    }
+
+    /**
+     * ★ 事务回滚验证（这是 @Transactional 存在的理由）
+     *
+     * 第 1 条明细正常，第 2 条商品名超过 VARCHAR(128) -> 数据库拒绝。
+     * 期望：整个方法回滚 —— 订单本身也不应留在库里，
+     *       否则就会出现一张"没有明细的半个订单"（脏数据）。
+     */
+    @Test
+    void createOrder_itemInsertFails_rollsBackOrder() {
+        String tooLong = "x".repeat(200);
+
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> service.createOrder("A001", null, List.of(
+                        item("正常商品", "10.00", 1),
+                        item(tooLong, "5.00", 1))));
+
+        // 断言异常确实来自【数据库拒绝明细】，而不是前置校验（否则这个测试就白测了）
+        assertEquals("明细数据不合法：商品名称过长或数值超出允许范围", e.getMessage());
+
+        assertNull(service.findOrder("A001"), "订单应被回滚");
+        assertTrue(service.findOrderItems("A001").isEmpty(), "明细也应被回滚");
+    }}
