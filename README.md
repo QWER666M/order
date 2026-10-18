@@ -11,6 +11,9 @@
 - **用户体系与 JWT 鉴权**：注册 / 登录签发 JWT；`/orders/**` 需携带 `Authorization: Bearer <token>`，
   未登录返回 401；密码使用 **BCrypt** 哈希存储
 - **数据隔离**：每个用户只能查询、支付、取消**自己**的订单；访问他人订单统一返回 404（不泄露订单是否存在）
+- **角色与权限模型**：`USER` / `ADMIN` 两种角色。管理员通过 `/admin/**` 可查看全部订单、
+  取消任意订单、查看用户列表与全局统计；普通用户访问管理接口返回 403。
+  管理员**不能代付**他人订单 —— 资金操作只归所属人。角色以数据库为准，降权后旧 token 立即失效
 - **订单明细**：一个订单可包含多条商品明细，总价由**服务端**按「单价 × 数量」计算
 - **查询订单**：支持按订单号查询单笔、分页查询订单列表
 - **支付订单**：仅允许「待支付」状态的订单支付
@@ -214,6 +217,16 @@ H2 控制台登录信息（使用 `h2` profile 时）：
 | POST | `/auth/register` | 注册并返回 token | 201 | 400 用户名/密码不合法 |
 | POST | `/auth/login` | 登录并返回 token | 200 | 401 用户名或密码错误 |
 
+### 管理端接口（仅 `ADMIN`）
+
+| 方法 | 路径 | 说明 | 成功 | 失败 |
+|---|---|---|---|---|
+| GET | `/admin/orders` | 分页查询**全部用户**的订单，可用 `?ownerId=` 筛选 | 200 | 401 未登录 / 403 非管理员 |
+| GET | `/admin/orders/{id}` | 查看任意订单详情（含明细） | 200 | 401 / 403 / 404 不存在 |
+| POST | `/admin/orders/{id}/cancel` | 取消任意订单（运营场景） | 200 | 401 / 403 / 404 / 409 状态冲突 |
+| GET | `/admin/users` | 用户列表（用户名 / 角色 / 创建时间） | 200 | 401 / 403 |
+| GET | `/admin/stats` | **全部用户**的金额统计 | 200 | 401 / 403 |
+
 ### 认证
 
 除 `/auth/**`、Swagger、H2 控制台外，所有接口都需要 JWT。
@@ -249,6 +262,64 @@ curl http://localhost:8080/orders \
 
 > ⚠️ **JWT 是签名，不是加密**：payload 只是 Base64 编码，任何人都能解开。
 > 因此 token 中**只放用户名和角色**，绝不放密码等敏感信息。
+
+### 角色与权限模型
+
+系统有两个角色：`USER`（注册默认）与 `ADMIN`。
+
+**权限矩阵**
+
+| 操作 | USER | ADMIN |
+|---|---|---|
+| 查看 / 支付 / 取消**自己的**订单 | ✅ | ✅ |
+| 查看**他人的**订单 | ❌ 404 | ✅ 走 `/admin/**` |
+| 取消**他人的**订单 | ❌ 404 | ✅ 走 `/admin/orders/{id}/cancel` |
+| 支付**他人的**订单 | ❌ 404 | **❌ 不提供**（资金操作只能由所属人发起） |
+| 查看全部用户 | ❌ 403 | ✅ |
+| 全局金额统计 | ❌ 403 | ✅ |
+
+即：**读权限可以放宽，写权限按业务性质分级** —— 管理员能审计、能止损，但不能代替用户花钱。
+
+**三种失败状态码的语义**
+
+| 状态码 | 含义 | 出现在 |
+|---|---|---|
+| **401** | 不知道你是谁 | 无 token / token 无效或过期 / 用户已被删除 |
+| **403** | 知道你是谁，但这条路径你不该进 | 普通用户访问 `/admin/**` |
+| **404** | 知道你是谁，但不告诉你资源存不存在 | 访问他人订单（**故意不用 403**，避免被用来枚举订单号） |
+
+**如何创建管理员**
+
+注册一律是 `USER` —— 服务端不接受客户端在注册时指定角色（否则人人都能注册成管理员）。提升角色直接改数据库：
+
+```sql
+UPDATE users SET role = 'ADMIN' WHERE username = 'alice';
+```
+
+改完**立即生效**，无需重新登录。
+
+**为什么角色要回数据库查，而不是直接读 token 里的 `role` 声明？**
+
+token 一旦签发就无法收回。如果用户被降权、甚至被删除，旧 token 里仍然写着 `ADMIN`，据此授权等于留了个后门。
+所以 `AuthInterceptor` 每个请求都会用 token 里的用户名回库取**当前角色**：
+
+- 好处：权限变更立即生效，不需要"强制下线"机制
+- 代价：每请求多一次按唯一索引的查询（后续可用缓存优化）
+
+一句话：**token 只证明「你是谁」，不决定「你能做什么」。**
+
+**权限要求写在哪**
+
+`@RequireRole` 注解标在 `AdminController` 类上，由 `RoleInterceptor` 统一拦截：
+
+```java
+@RestController
+@RequestMapping("/admin")
+@RequireRole(Role.ADMIN)     // 整个 Controller 都需要 ADMIN
+public class AdminController { ... }
+```
+
+新增管理接口时**不需要改拦截器**，注解即契约。这与 Spring Security 的 `@PreAuthorize` 是同一思路。
 
 ### 请求示例
 
@@ -428,7 +499,11 @@ order-app/
     │   │   ├── UserRepository.java          用户数据访问
     │   │   ├── JwtService.java              JWT 签发与验签
     │   │   ├── AuthController.java          /auth/register、/auth/login
+    │   │   ├── AdminController.java         管理端接口（仅 ADMIN）
     │   │   ├── AuthInterceptor.java         校验 Bearer token
+    │   │   ├── Role.java                    角色枚举 USER / ADMIN
+    │   │   ├── RequireRole.java             声明接口所需角色的注解
+    │   │   ├── RoleInterceptor.java         按 @RequireRole 做授权（403）
     │   │   ├── WebConfig.java               注册拦截器与放行路径
     │   │   ├── PasswordEncoderConfig.java   BCrypt Bean
     │   │   ├── LoginFailedException.java    登录失败（映射为 401）
@@ -442,6 +517,7 @@ order-app/
     │   │       ├── OrderResponse.java        列表用出参（不含明细）
     │   │       ├── OrderDetailResponse.java  详情用出参（含明细）
     │   │       ├── OrderItemResponse.java    明细出参（含小计）
+    │   │       ├── AdminUserResponse.java    管理端用户列表项（不含密码）
     │   │       └── PageResponse.java         通用分页结构
     │   └── resources/
     │       ├── application.properties       公共配置 + 默认数据源（MySQL）
@@ -451,7 +527,8 @@ order-app/
         ├── java/com/example/order/
         │   ├── OrderServiceTest.java        业务层测试（含并发测试）
         │   ├── OrderControllerTest.java     接口层测试（MockMvc）
-        │   └── AuthApiTest.java             认证与授权测试（开启鉴权）
+        │   ├── AuthApiTest.java             认证与授权测试（开启鉴权）
+        │   └── AdminApiTest.java            角色与权限模型测试（开启鉴权）
         └── resources/
             └── application.properties       测试专用配置（H2 内存库）
 ```
@@ -500,7 +577,7 @@ CREATE TABLE order_items (
 
 ## 测试
 
-共 **51 个测试**，分三层：
+共 **65 个测试**，分三层：
 
 ### 业务层测试 `OrderServiceTest`（18 个）
 
@@ -573,6 +650,27 @@ CREATE TABLE order_items (
 
 两层测试的分工：**业务层测"逻辑对不对"，接口层测"HTTP 契约对不对"**。
 
+### 角色与权限测试 `AdminApiTest`（14 个）
+
+同样开启鉴权，专门验证"谁能做什么"：
+
+| 测试 | 验证内容 |
+|---|---|
+| `adminEndpoints_withoutToken_returns401` | 未登录访问 `/admin/**` 返回 401 |
+| `adminEndpoints_asNormalUser_returns403` | 普通用户访问 `/admin/**` 返回 **403** |
+| `adminEndpoints_withInvalidToken_returns401` | 伪造 token 返回 401 |
+| `admin_seesAllUsersOrders` | 管理员能看到**所有用户**的订单 |
+| `admin_canFilterByOwnerId` | `?ownerId=` 可按归属人筛选 |
+| `admin_canReadOthersOrderWithItems` | 管理员能读任意订单详情（含明细） |
+| `admin_canCancelOthersOrder` | 管理员能取消他人订单 |
+| `admin_cancelPaidOrder_stillReturns409` | **管理员不改变业务规则**：已支付订单仍不能取消 |
+| `admin_cannotPayOthersOrder_returns404` | **管理员不能代付**：资金操作只归所属人 |
+| `normalUser_stillCannotReadOthersOrder_returns404` | 回归：普通用户的数据隔离没有被破坏 |
+| `admin_users_neverExposePasswordHash` | 用户列表响应中**不含任何密码字段** |
+| `admin_stats_coversAllUsers` | 全局统计覆盖所有用户，而非只统计自己 |
+| **`promotedAndDemotedAdmin_takesEffectImmediately`** | **权限以数据库为准**：同一个旧 token，提升后立刻 200，撤权后立刻 403 |
+| `deletedUser_tokenBecomesInvalid` | 用户被删除后，未过期的 token 立刻失效（401） |
+
 ### 数据源守卫 `DataSourceBindingTest`（1 个）
 
 只做一件事：断言"当前测试到底连的是哪个数据库"，由环境变量 `EXPECT_DB` 驱动。
@@ -638,6 +736,14 @@ mvn clean verify
   （`SPRING_DATASOURCE_URL` 自动对应 `spring.datasource.url`）。
   因此 CI 无需改动任何代码或配置文件，仅靠注入环境变量就能把同一套测试切到真 MySQL 上运行；
   真实部署时数据库口令也应通过这种方式注入，而不是写死在仓库里
+- **认证与授权分离**：`AuthInterceptor` 只负责"你是谁"（验签，失败 401）；
+  `RoleInterceptor` 读 `@RequireRole` 注解负责"你能做什么"（失败 403）。
+  角色不信任 token 里的声明，每个请求回库取当前角色 —— 换来权限变更立即生效
+- **权限按路径分层**：`/orders/**` 是"我的订单"（任何角色都只操作自己的），
+  `/admin/**` 是"管理视图"（仅 ADMIN）。契约不随角色变化，权限要求用注解声明，
+  新增管理接口无需改动拦截器
+- **授权按业务性质分级**：管理员能读任意订单、能取消（运营止损），
+  但**不能代付** —— 资金操作必须由订单所属人发起。权限是"能对谁做"，不是"能跳过业务规则"
 - **连接池（HikariCP）**：Spring Boot 默认自带。连接池复用连接，
   避免每次请求都做 TCP 握手与认证；配置了最大连接数、最小空闲连接与获取超时
 - **MySQL 连接参数**：`characterEncoding=utf8` 保证中文不乱码，`serverTimezone` 明确时区，

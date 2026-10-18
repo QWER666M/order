@@ -41,14 +41,16 @@ public class UserService {
 
         String hash = encoder.encode(rawPassword);      // BCrypt 哈希（自带随机盐）
         try {
-            repository.add(new User(username, hash, "USER"));
+            repository.add(new User(username, hash, Role.USER.name()));
         } catch (DuplicateKeyException e) {
             // 并发兜底：contains 与 insert 之间有窗口期，靠数据库唯一约束最终拦截
             throw new IllegalArgumentException("用户名已存在：" + username);
         }
 
         log.info("用户注册成功: username={}", username);
-        return new AuthResponse(jwt.createToken(username, "USER"), username, "USER");
+        // ★ 注册一律是 USER。管理员只能通过数据库/运维手段授予，
+        //   绝不接受客户端在注册时自己指定 role —— 否则任何人都能注册成 ADMIN。
+        return new AuthResponse(jwt.createToken(username, Role.USER.name()), username, Role.USER.name());
     }
 
     /** 登录：校验密码 -> 签发 token */

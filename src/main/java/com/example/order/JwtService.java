@@ -45,7 +45,13 @@ public class JwtService {
         this.expireMinutes = expireMinutes;
     }
 
-    /** 签发 token：把用户名和角色写进 payload，并设置过期时间 */
+    /**
+     * 签发 token：把用户名和角色写进 payload，并设置过期时间。
+     *
+     * ★ 注意：这里的 role 声明只用于【前端展示/调试】，服务端授权一律以数据库为准
+     *   （见 AuthInterceptor）。因为 token 签发后无法收回，
+     *   用户被降权后旧 token 里的 role 依然是旧值，据此授权等于给了后门。
+     */
     public String createToken(String username, String role) {
         Date now = new Date();
         Date expiresAt = new Date(now.getTime() + expireMinutes * 60_000);

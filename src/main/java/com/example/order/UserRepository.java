@@ -2,6 +2,8 @@ package com.example.order;
 
 import java.util.List;
 
+import com.example.order.dto.AdminUserResponse;
+
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
@@ -46,5 +48,21 @@ public class UserRepository {
         Integer count = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM users WHERE username = ?", Integer.class, username);
         return count != null && count > 0;
+    }
+
+    /**
+     * 管理端：列出全部用户（不含密码哈希）。
+     *
+     * ★ 显式只查三列，不用 SELECT * ——
+     *   这样 password_hash 在【代码层面】就不可能被带出来，
+     *   比"记得别返回它"可靠得多。列多的表尤其要注意这点。
+     */
+    public List<AdminUserResponse> findAllSummaries() {
+        return jdbc.query(
+                "SELECT username, role, created_at FROM users ORDER BY id",
+                (rs, rowNum) -> new AdminUserResponse(
+                        rs.getString("username"),
+                        rs.getString("role"),
+                        rs.getTimestamp("created_at").toLocalDateTime()));
     }
 }

@@ -20,8 +20,14 @@ import jakarta.servlet.http.HttpServletResponse;
  * 流程：
  *   1. 读 Authorization 头，格式必须是 "Bearer <token>"
  *   2. 验签 + 检查过期时间（JwtService 里做）
- *   3. 成功 -> request.setAttribute("currentUsername", 用户名)，后续 Controller 直接取
+ *   3. 成功 -> 用 token 里的用户名【回数据库取当前角色】，把 username / role 写入 request 属性
  *      失败 -> 返回 401
+ *
+ * ★ 为什么角色要回库查，而不是直接读 token 里的 role 声明？
+ *   token 一旦签发就无法收回。如果用户被降权、甚至被删除，
+ *   旧 token 里仍然写着 "ADMIN"。回库查询换来"权限变更立即生效"，
+ *   代价是每个请求多一次按唯一索引的查询（以后可以加缓存优化）。
+ *   一句话：token 只证明【你是谁】，不决定【你能做什么】。
  *
  * ★ 为什么用拦截器而不是在每个 Controller 方法里写一遍校验？
  *   校验逻辑只写一处，新增接口自动受保护，不会漏。
@@ -37,13 +43,18 @@ public class AuthInterceptor implements HandlerInterceptor {
     /** Controller 通过 @RequestAttribute("currentUsername") 取这个值 */
     public static final String ATTR_USERNAME = "currentUsername";
 
+    /** 当前用户的角色，由 RoleInterceptor 读取 */
+    public static final String ATTR_ROLE = "currentRole";
+
     private static final Logger log = LoggerFactory.getLogger(AuthInterceptor.class);
 
     private final JwtService jwt;
+    private final UserRepository userRepository;
     private final ObjectMapper objectMapper;
 
-    public AuthInterceptor(JwtService jwt, ObjectMapper objectMapper) {
+    public AuthInterceptor(JwtService jwt, UserRepository userRepository, ObjectMapper objectMapper) {
         this.jwt = jwt;
+        this.userRepository = userRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -60,7 +71,17 @@ public class AuthInterceptor implements HandlerInterceptor {
         String token = header.substring("Bearer ".length()).trim();
         try {
             String username = jwt.parseUsername(token);
-            request.setAttribute(ATTR_USERNAME, username);
+
+            // 用户可能已被删除 —— 此时即使 token 还没过期，也必须视为未登录
+            User user = userRepository.findByUsername(username);
+            if (user == null) {
+                log.warn("token 有效但用户已不存在: username={}", username);
+                writeUnauthorized(response, "登录已失效，请重新登录");
+                return false;
+            }
+
+            request.setAttribute(ATTR_USERNAME, user.getUsername());
+            request.setAttribute(ATTR_ROLE, Role.from(user.getRole()));
             return true;                       // 放行
         } catch (JwtException | IllegalArgumentException e) {
             // 签名不对 / 已过期 / 格式错误 —— 对外统一说"登录已失效"，
