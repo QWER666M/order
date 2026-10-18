@@ -366,6 +366,109 @@
     别人（包括面试官）点开仓库就能看到绿标。
 
 
+【5.7 CI 里跑真 MySQL：services + 环境变量覆盖】
+
+  问题：CI 默认在 H2 内存库上跑测试。H2 是"仿真"数据库，和真 MySQL 有差异：
+        字符集（中文变 ??）、严格模式（超长字符串是报错还是截断）、
+        自增、外键、GROUP BY 行为……
+        在 H2 上全绿 != 在 MySQL 上也全绿。
+
+  做法：让 GitHub Actions 额外起一个 MySQL 容器（等价于本地 docker compose up），
+        再用【环境变量】把测试数据源指过去 —— 一行 Java 代码都不用改。
+
+    jobs:
+      test-mysql:
+        runs-on: ubuntu-latest
+        services:                          # ★ 关键：service container
+          mysql:
+            image: mysql:8.4
+            env:
+              MYSQL_ROOT_PASSWORD: root
+              MYSQL_DATABASE: orderdb
+              MYSQL_USER: order
+              MYSQL_PASSWORD: order123
+            ports:
+              - 3306:3306
+            options: >-                    # ★ 健康检查
+              --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -proot --silent"
+              --health-interval=10s
+              --health-timeout=5s
+              --health-retries=12
+        env:
+          SPRING_DATASOURCE_URL: jdbc:mysql://127.0.0.1:3306/orderdb?...&allowPublicKeyRetrieval=true
+          SPRING_DATASOURCE_DRIVER_CLASS_NAME: com.mysql.cj.jdbc.Driver
+          SPRING_DATASOURCE_USERNAME: order
+          SPRING_DATASOURCE_PASSWORD: order123
+          EXPECT_DB: mysql
+        steps:
+          - uses: actions/checkout@v4
+          - uses: actions/setup-java@v4
+            with: { java-version: '21', distribution: 'temurin', cache: maven }
+          - run: mvn -B clean verify
+
+  ★ 为什么不用改配置文件？（务必理解这条）
+    Spring Boot 配置优先级：
+        命令行参数  >  环境变量  >  application.properties
+    且环境变量是"宽松绑定"（relaxed binding）：
+        SPRING_DATASOURCE_URL                -> spring.datasource.url
+        SPRING_DATASOURCE_DRIVER_CLASS_NAME  -> spring.datasource.driver-class-name
+    所以 src/test/resources/application.properties 里写死的 H2 配置会被覆盖。
+    这个手法叫【配置外置】（12-Factor App）：
+    同一份构建产物，靠外部注入的配置跑在不同环境。
+
+  ★ 坑 1：容器"启动了"不等于数据库"能连"
+    mysqld 起来后还要初始化数据目录，前几秒端口连不上。
+    - 用 services.mysql.options 的 --health-cmd，GitHub 会等 healthy 再继续
+    - 再补一层端口探测更稳：
+        for i in $(seq 1 30); do
+          (echo > /dev/tcp/127.0.0.1/3306) 2>/dev/null && exit 0
+          sleep 2
+        done; exit 1
+
+  ★ 坑 2：环境变量拼错，Spring 会【静默忽略】，流水线就"说谎"了
+    比如把 SPRING_DATASOURCE_URL 写成 SPRING_DATASOURCE_URI，
+    不报错、不警告，测试照样在 H2 上全绿 —— 但 CI 报告"MySQL 通过"。
+    防法：加一个守卫测试，主动断言"我到底连的是谁"：
+
+        String expected = System.getenv("EXPECT_DB");
+        assumeTrue(expected != null, "未设置 EXPECT_DB，跳过");
+        String url = dataSource.getConnection().getMetaData().getURL();
+        assertTrue(url.toLowerCase().contains(expected), "期望 " + expected + "，实际 " + url);
+
+    CI 里设 EXPECT_DB=mysql 就必须连上 MySQL；本地不设则自动 skip。
+    ★ 这个思路可以反复用：凡是"靠外部配置切换行为"的地方，都值得加一条断言。
+
+  ★ 坑 3：测试之间的数据隔离
+    本项目每个测试类都有 @BeforeEach 清表（先删 order_items 再删 orders，
+    因为有外键）。换到 MySQL 后这一点不变，所以整套测试可以原样迁移。
+    如果测试依赖"空表"却没清理，在 H2 上可能侥幸通过，
+    在 MySQL 上就会因残留数据而随机失败（flaky test）。
+
+  ★ 坑 4：SQL 方言差异
+    - 迁移前先确认建表脚本两边都能跑（本项目 schema.sql 用
+      CREATE TABLE IF NOT EXISTS，MySQL 与 H2 通用）
+    - 断言不要依赖数据库错误文案（H2 和 MySQL 的报错文字完全不同），
+      要断言【异常类型】（本项目断言 DataIntegrityViolationException）
+    - 中文测试数据一定要在 URL 里带 characterEncoding=utf8
+
+  ★ 坑 5：CI 失败时看不到细节
+    控制台日志又长又乱。加一步在失败时上传测试报告：
+
+        - if: failure()
+          uses: actions/upload-artifact@v4
+          with:
+            name: surefire-reports
+            path: target/surefire-reports/
+
+  ★ 面试话术：
+    "CI 我跑两个 job：H2 那个几十秒出结果，负责快速反馈；
+     另一个用 service container 起 MySQL 8，跑同一套测试，
+     通过注入 SPRING_DATASOURCE_* 环境变量切换数据源，
+     同一份代码不改造就能验真库。
+     另外加了一个数据源守卫测试，防止环境变量拼错导致
+     测试偷偷跑在 H2 上、CI 却显示 MySQL 通过。"
+
+
 ============================================================
 六、单元测试（JUnit 5）
 ============================================================
@@ -1727,6 +1830,8 @@ Q10 什么是依赖注入？
   Step 17 订单明细与事务          1:N 外键、@Transactional 回滚、服务端计算金额、避免 N+1
                                   ★ 实测：去掉 @Transactional 后立刻出现"无明细的半截订单"
   Step 18 认证与授权              BCrypt、JWT（签名非加密）、拦截器、数据隔离、401/403/404
+  Step 19 CI 接入真 MySQL         service container + 健康检查；环境变量覆盖数据源（配置外置）；
+                                 数据源守卫测试，防止环境变量拼错时"流水线说谎"
 
 ============================================================
   笔记结束。卡住的时候先翻"常见坑清单"，再去"面试问答"自测。

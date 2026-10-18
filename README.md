@@ -412,7 +412,7 @@ order-app/
 ├── .gitignore
 ├── docker-compose.yml                       MySQL 开发环境（一键启动）
 ├── db/init-mysql.sql                        重建 MySQL 库与账号（root 执行）
-├── .github/workflows/ci.yml                 CI：自动构建与测试
+├── .github/workflows/ci.yml                 CI：H2 快速验证 + MySQL 真库验证
 └── src/
     ├── main/
     │   ├── java/com/example/order/
@@ -500,7 +500,7 @@ CREATE TABLE order_items (
 
 ## 测试
 
-共 **50 个测试**，分三层：
+共 **51 个测试**，分三层：
 
 ### 业务层测试 `OrderServiceTest`（18 个）
 
@@ -573,7 +573,20 @@ CREATE TABLE order_items (
 
 两层测试的分工：**业务层测"逻辑对不对"，接口层测"HTTP 契约对不对"**。
 
-测试使用 H2 **内存数据库**（`jdbc:h2:mem:testdb`），并在每个测试方法前清空数据表，
+### 数据源守卫 `DataSourceBindingTest`（1 个）
+
+只做一件事：断言"当前测试到底连的是哪个数据库"，由环境变量 `EXPECT_DB` 驱动。
+
+- 本地不设 `EXPECT_DB` → 自动 `assumeTrue` **跳过**（默认跑 H2，不需要装数据库）
+- CI 设置 `EXPECT_DB=mysql` → 连接串里必须出现 `mysql`，否则测试失败
+
+它防的是一种很隐蔽的事故：CI 里环境变量名字拼错（例如写成 `SPRING_DATASOURCE_URI`），
+Spring 会**静默忽略**这个变量，测试于是在 H2 上全绿，流水线却报告"MySQL 通过"——
+从头到尾根本没碰过 MySQL。有了这个守卫，流水线就不可能说谎。
+
+### 默认 H2 / 可选 MySQL
+
+测试默认使用 H2 **内存数据库**（`jdbc:h2:mem:testdb`），并在每个测试方法前清空数据表，
 以保证测试之间相互独立、且不污染开发数据。
 
 ```bash
@@ -582,12 +595,36 @@ mvn test -Dtest=OrderControllerTest         # 只跑接口层测试
 mvn test -Dtest=OrderServiceTest#pay_concurrentOnlyOneSucceeds   # 只跑某一个测试
 ```
 
+同一套测试也可以直接跑在**真 MySQL** 上，无需改动任何代码或配置文件 ——
+Spring Boot 的配置优先级是 `命令行参数 > 环境变量 > application.properties`，
+而环境变量走宽松绑定（`SPRING_DATASOURCE_URL` → `spring.datasource.url`），
+所以只要注入下面几个变量，就会覆盖测试配置里的 H2：
+
+```powershell
+$env:SPRING_DATASOURCE_URL = "jdbc:mysql://127.0.0.1:3306/orderdb?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true"
+$env:SPRING_DATASOURCE_DRIVER_CLASS_NAME = "com.mysql.cj.jdbc.Driver"
+$env:SPRING_DATASOURCE_USERNAME = "order"
+$env:SPRING_DATASOURCE_PASSWORD = "order123"
+$env:EXPECT_DB = "mysql"      # 打开数据源守卫
+mvn clean verify
+```
+
 ## 持续集成
 
-仓库配置了 GitHub Actions（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）：
-每次推送到 `main` 或提交 Pull Request 时，会自动在 JDK 21 环境中执行
-`mvn -B clean verify`（编译 → 全部测试 → 打包），确保进入主分支的代码始终可构建、测试通过。
-构建状态见页面顶部的 CI 徽章。
+仓库配置了 GitHub Actions（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)），
+每次推送到 `main` 或提交 Pull Request 时并行跑两个任务：
+
+| 任务 | 数据库 | 作用 |
+|---|---|---|
+| `build`（H2） | H2 内存库 | 快速反馈：几十秒出结果，适合每次 push 都跑 |
+| `test-mysql`（MySQL 8.4） | MySQL 8.4 容器 | 真库验证：字符集、严格模式、自增、外键等真实行为 |
+
+`test-mysql` 通过 `services:` 启动一个 `mysql:8.4` 容器（等价于本地 `docker compose up -d`），
+并配置健康检查，等数据库真正可连接后才开始执行 `mvn -B clean verify`；
+随后用环境变量把测试数据源指向它，同时设置 `EXPECT_DB=mysql` 让守卫测试确认连接确实生效。
+
+两个任务都执行完整的 `clean verify`（编译 → 全部测试 → 打包），任一个失败即表示不能合并。
+构建状态见页面顶部的 CI 徽章；失败时可在 Actions 页面下载 `surefire-reports` 构件查看具体用例。
 
 ## 技术实现要点
 
@@ -596,6 +633,11 @@ mvn test -Dtest=OrderServiceTest#pay_concurrentOnlyOneSucceeds   # 只跑某一�
 - **多环境配置（Profile）**：默认使用 MySQL，`h2` profile 提供免 Docker 的备用数据源；
   测试通过 `src/test/resources/application.properties` 覆盖为 H2 内存库 ——
   由于测试类路径优先，测试**完全不受 MySQL 配置影响**，无需任何外部依赖即可运行
+- **配置外置（12-Factor）**：Spring Boot 的配置优先级为
+  命令行参数 > 环境变量 > `application.properties`，且环境变量走宽松绑定
+  （`SPRING_DATASOURCE_URL` 自动对应 `spring.datasource.url`）。
+  因此 CI 无需改动任何代码或配置文件，仅靠注入环境变量就能把同一套测试切到真 MySQL 上运行；
+  真实部署时数据库口令也应通过这种方式注入，而不是写死在仓库里
 - **连接池（HikariCP）**：Spring Boot 默认自带。连接池复用连接，
   避免每次请求都做 TCP 握手与认证；配置了最大连接数、最小空闲连接与获取超时
 - **MySQL 连接参数**：`characterEncoding=utf8` 保证中文不乱码，`serverTimezone` 明确时区，

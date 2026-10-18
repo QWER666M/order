@@ -9,8 +9,16 @@ on:
   pull_request:
 
 jobs:
+  # ==========================================================
+  # 任务 1：快速反馈（H2 内存库）
+  #
+  # 内存库启动快、零外部依赖，最适合"每次 push 都跑一遍"。
+  # 但它毕竟是"仿真"数据库，与 MySQL 有差异
+  # （字符集、严格模式、自增、外键、VARCHAR 超长行为……），
+  # 所以还需要下面那个真数据库任务兜底。
+  # ==========================================================
   build:
-    name: 构建与测试
+    name: 构建与测试（H2）
     runs-on: ubuntu-latest
 
     steps:
@@ -33,3 +41,97 @@ jobs:
       #    -B     ：批处理模式，日志更干净（适合 CI）
       - name: 构建并运行测试
         run: mvn -B clean verify
+
+      # 失败时把测试报告存下来，方便在网页上直观看是哪个用例挂了
+      # （CI 控制台日志太长，翻起来很痛苦）
+      - name: 上传测试报告
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports-h2
+          path: target/surefire-reports/
+          retention-days: 7
+
+  # ==========================================================
+  # 任务 2：真数据库验证（MySQL 8.4）
+  #
+  # services: 让 GitHub 在 CI 机器上额外起一个【容器】，
+  # 效果等价于本地 `docker compose up -d`，但不需要写 Dockerfile。
+  #
+  # ★ 关键点：这里没有改动任何一行 Java 代码或配置文件。
+  #   Spring Boot 的配置优先级是：
+  #       命令行参数  >  环境变量  >  application.properties
+  #   而环境变量走"宽松绑定"（relaxed binding）：
+  #       SPRING_DATASOURCE_URL  ==>  spring.datasource.url
+  #   所以只要在 env: 里注入变量，就会覆盖
+  #   src/test/resources/application.properties 中的 H2 配置。
+  #   这就是"配置外置"（12-Factor App）的实际用法。
+  # ==========================================================
+  test-mysql:
+    name: 集成测试（MySQL 8.4）
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: orderdb
+          MYSQL_USER: order
+          MYSQL_PASSWORD: order123
+        ports:
+          - 3306:3306
+        # 健康检查：容器"已启动"不等于数据库"可连接"
+        # （mysqld 初始化数据目录还要好几秒）。
+        # 配了 health-cmd 后，GitHub 会等它变成 healthy 才开始跑后续步骤。
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -proot --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+
+    env:
+      # 覆盖测试配置里的 H2 连接信息（URL 参数与主配置 application.properties 一致）
+      SPRING_DATASOURCE_URL: jdbc:mysql://127.0.0.1:3306/orderdb?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: com.mysql.cj.jdbc.Driver
+      SPRING_DATASOURCE_USERNAME: order
+      SPRING_DATASOURCE_PASSWORD: order123
+      # 给 DataSourceBindingTest 用：断言"真的连上了 MySQL"，
+      # 防止环境变量拼错、Spring 静默忽略、测试退回 H2 却显示全绿（流水线说谎）
+      EXPECT_DB: mysql
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      # 双保险：healthcheck 通过后再确认 3306 端口真的能连
+      - name: 等待 MySQL 端口可用
+        run: |
+          echo "目标连接串: $SPRING_DATASOURCE_URL"
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/3306) 2>/dev/null; then
+              echo "MySQL 已就绪（第 ${i} 次探测）"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "MySQL 在 30 次探测后仍不可用"
+          exit 1
+
+      - name: 构建并运行测试（真 MySQL）
+        run: mvn -B clean verify
+
+      - name: 上传测试报告
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports-mysql
+          path: target/surefire-reports/
+          retention-days: 7
