@@ -1,12 +1,12 @@
-# MySQL 8 —— 用 Docker Compose 一键起一个干净、可复现的数据库环境
+# MySQL 8 + Spring Boot 应用 —— 用 Docker Compose 一键起整套环境
 #
 # 常用命令（在项目根目录执行）：
-#   docker compose up -d      启动（后台）
-#   docker compose ps         查看状态（State 为 healthy 即可用）
-#   docker compose logs -f    看日志
-#   docker compose stop       停止容器（数据保留在数据卷里）
-#   docker compose down       停止并删除容器（数据仍保留在数据卷里）
-#   docker compose down -v    停止并删除容器【连同数据卷】(数据全部清空，谨慎)
+#   docker compose up -d --build   构建应用镜像并启动（首次或改了代码后用这个）
+#   docker compose up -d           启动（镜像已构建过）
+#   docker compose ps              查看状态（State 为 healthy/running 即可用）
+#   docker compose logs -f app     只看应用日志
+#   docker compose down            停止并删除容器（数据仍保留在数据卷里）
+#   docker compose down -v         停止并删除容器【连同数据卷】(数据全部清空，谨慎)
 #
 # 连接信息（与 src/main/resources/application.properties 保持一致）：
 #   host=localhost  port=3306  database=orderdb  user=order  password=order123
@@ -44,6 +44,48 @@ services:
       timeout: 5s
       retries: 20
       start_period: 30s
+
+  # ==========================================================
+  # 应用服务：把 Spring Boot 打成镜像后一起启动
+  #
+  # 启动顺序由 depends_on + healthcheck 保证：
+  #   mysql 通过健康检查变成 healthy 之后，app 才会启动。
+  # ★ 注意 depends_on 有两种写法，含义完全不同：
+  #     depends_on: [mysql]                       只等"容器启动"，不等"数据库能连"
+  #     depends_on: {mysql: {condition: service_healthy}}  等健康检查通过（本项目用这个）
+  #   前者常见事故：MySQL 还在初始化数据目录，app 已经启动并连接失败退出。
+  # ==========================================================
+  app:
+    build:
+      context: .              # 构建上下文 = 项目根目录（受 .dockerignore 约束）
+      dockerfile: Dockerfile
+    image: order-app:local
+    container_name: order-app
+    restart: unless-stopped
+
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+    # ★★ 最容易踩的坑：容器里的 localhost 指【容器自己】，不是宿主机
+    #
+    #   application.properties 里写的是 localhost:3306（在宿主机上跑没问题），
+    #   但放进容器后，localhost 就是这个 app 容器自身，那里根本没有 MySQL。
+    #   容器之间要用【compose 的服务名】互相访问：Docker 内置 DNS 会把
+    #   mysql 解析到 mysql 容器的 IP —— 所以这里写 mysql:3306。
+    #
+    #   做法上不改一行代码，用环境变量覆盖（和 CI 里切 MySQL 是同一招）。
+    environment:
+      SPRING_DATASOURCE_URL: "jdbc:mysql://mysql:3306/orderdb?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true"
+      SPRING_DATASOURCE_USERNAME: order
+      SPRING_DATASOURCE_PASSWORD: order123
+      # 让 JVM 按【容器内存上限】的 75% 计算堆，而不是按物理机内存。
+      # （Java 10+ 能感知 cgroup 限制，但显式设置百分比更可控；
+      #   用 JAVA_TOOL_OPTIONS 而不是改 ENTRYPOINT，保持镜像通用）
+      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=75"
+
+    ports:
+      - "8080:8080"           # 宿主机 8080 -> 容器 8080
 
 volumes:
   mysql-data:

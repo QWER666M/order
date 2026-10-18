@@ -135,3 +135,83 @@ jobs:
           name: surefire-reports-mysql
           path: target/surefire-reports/
           retention-days: 7
+
+  # ==========================================================
+  # 任务 3：验证 Dockerfile 真的能构建、镜像真的能跑起来
+  #
+  # ★ 为什么 CI 里要单独验证镜像？
+  #   Dockerfile 写错（基础镜像 tag 不存在、COPY 路径不对、
+  #   非 root 用户对文件没权限…）在本地很难每次都测到。
+  #   放到 CI 里，每次 push 都真实执行一遍 docker build + docker run，
+  #   保证"能跑"这件事不是靠记忆，而是被持续验证的。
+  #
+  # 这一节也顺便验证了容器化最关键的两个假设：
+  #   1) 镜像里打进了可运行的 fat jar（多阶段构建的第二阶段复制正确）
+  #   2) 应用能通过【环境变量】连上容器网络里的 MySQL（配置外置生效）
+  # ==========================================================
+  docker-image:
+    name: 构建镜像并启动验证
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: orderdb
+          MYSQL_USER: order
+          MYSQL_PASSWORD: order123
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -proot --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 这里【不装 JDK】：构建发生在镜像内部的多阶段构建里，
+      # 正好验证"Dockerfile 自带构建环境"这个前提。
+      - name: 构建镜像
+        run: docker build -t order-app:ci .
+
+      - name: 查看镜像大小
+        run: docker image ls order-app:ci --format "镜像大小 {{.Size}}"
+
+      # --network host：让容器直接用宿主机的网络栈，
+      # 这样容器里的 127.0.0.1:3306 就是上面那个 MySQL service。
+      # （生产环境不会这么用，这里只是为了让 CI 少写一层网络配置。）
+      - name: 启动容器
+        run: |
+          docker run -d --name app --network host \
+            -e SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:3306/orderdb?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true" \
+            -e SPRING_DATASOURCE_USERNAME=order \
+            -e SPRING_DATASOURCE_PASSWORD=order123 \
+            -e JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75" \
+            order-app:ci
+
+      - name: 等待应用就绪并验证
+        run: |
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/orders || true)
+            if [ "$code" = "401" ]; then
+              echo "应用已就绪：GET /orders 返回 401（未带 token，符合预期）"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "应用在 120 秒内未就绪，最后状态码：$code"
+          exit 1
+
+      - name: 输出容器日志（失败时）
+        if: failure()
+        run: docker logs app
+
+      - name: 确认为非 root 用户运行
+        run: |
+          whoami_in_container=$(docker exec app id -un)
+          echo "容器内运行用户: $whoami_in_container"
+          test "$whoami_in_container" = "appuser"

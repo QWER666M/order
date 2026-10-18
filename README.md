@@ -87,14 +87,54 @@
 
 ### 前置要求
 
-- JDK 21 或更高版本
-- Maven 3.9 或更高版本
-- Docker（用于一键启动 MySQL；也可改用本机已安装的 MySQL，或使用 `h2` profile 免数据库运行）
+- **方式一（容器化，只需 Docker）**：Docker Desktop（含 Compose V2）
+- **方式二（本地运行，改代码更快）**：JDK 21+、Maven 3.9+，以及一个可用的 MySQL
+  （也可用 `h2` profile 完全免数据库）
+
+## 方式一：一条命令起全套（Docker）
+
+```bash
+docker compose up -d --build
+```
+
+这条命令做了三件事：
+
+1. 按 [`Dockerfile`](Dockerfile) 把 Spring Boot 打成镜像（多阶段构建，最终镜像只含 JRE + jar）
+2. 启动 MySQL 8.4 容器，等它通过健康检查
+3. 启动应用容器，通过服务名 `mysql:3306` 连库，端口映射到宿主机 `8080`
+
+确认状态：
+
+```bash
+docker compose ps            # mysql 应为 healthy，app 应为 running
+docker compose logs -f app   # 看应用日志
+```
+
+然后访问 http://localhost:8080/swagger-ui.html 。
+
+> **两个关键点**
+>
+> - **容器里的 `localhost` 指的是容器自己**。应用配置里写的 `localhost:3306` 在容器内指向 app 容器自身，
+>   那里根本没有 MySQL。`docker-compose.yml` 用 `SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/...`
+>   覆盖成**服务名** —— Docker 内置 DNS 会把 `mysql` 解析到数据库容器。
+>   这也是为什么**没有改一行代码**：环境变量优先级高于配置文件。
+> - **`depends_on` 必须写 `condition: service_healthy`**。简写的 `depends_on: [mysql]`
+>   只等"容器已启动"，不等"数据库可连接"，应用会在 MySQL 初始化那几十秒里连接失败退出。
+
+改了代码后重新构建（`--build` 强制重建镜像）：
+
+```bash
+docker compose up -d --build
+```
+
+## 方式二：本地运行
 
 ### 第 1 步：启动数据库
 
+只启动 MySQL 容器（注意带上服务名 `mysql`，否则会把 app 容器也一起拉起来，占用 8080）：
+
 ```bash
-docker compose up -d
+docker compose up -d mysql
 ```
 
 确认状态为 `healthy`（首次启动 MySQL 初始化需要几十秒）：
@@ -176,6 +216,15 @@ mvn test
 
 ```bash
 mvn clean verify
+java -jar target/order-app-1.0.0.jar
+```
+
+配合环境变量可以不改配置就指向别的数据库（与容器里的启动方式完全一致）：
+
+```powershell
+$env:SPRING_DATASOURCE_URL = "jdbc:mysql://127.0.0.1:3306/orderdb?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true"
+$env:SPRING_DATASOURCE_USERNAME = "order"
+$env:SPRING_DATASOURCE_PASSWORD = "order123"
 java -jar target/order-app-1.0.0.jar
 ```
 
@@ -481,7 +530,9 @@ order-app/
 ├── pom.xml                                  Maven 配置
 ├── README.md
 ├── .gitignore
-├── docker-compose.yml                       MySQL 开发环境（一键启动）
+├── docker-compose.yml                       MySQL + 应用 一键启动
+├── Dockerfile                               多阶段构建（Maven 构建 → 仅 JRE 运行）
+├── .dockerignore                            构建上下文排除项（target/、data/、.git/…）
 ├── db/init-mysql.sql                        重建 MySQL 库与账号（root 执行）
 ├── .github/workflows/ci.yml                 CI：H2 快速验证 + MySQL 真库验证
 └── src/
@@ -744,6 +795,18 @@ mvn clean verify
   新增管理接口无需改动拦截器
 - **授权按业务性质分级**：管理员能读任意订单、能取消（运营止损），
   但**不能代付** —— 资金操作必须由订单所属人发起。权限是"能对谁做"，不是"能跳过业务规则"
+- **容器化（多阶段构建）**：`Dockerfile` 分两个阶段 —— 用 `maven` 镜像编译打包，
+  再把**一个 jar** 复制进 `eclipse-temurin:21-jre` 运行。最终镜像不含 Maven、依赖缓存与源码，
+  体积从 600MB+ 降到约 200MB，也缩小了攻击面
+- **构建缓存分层**：先 `COPY pom.xml` + `dependency:go-offline`，再 `COPY src`。
+  Docker 每一层都会被缓存，而"输入变了之后的层全部失效"；这样改代码不会重新下载依赖
+- **容器安全与优雅停机**：用非 root 用户（`USER appuser`）运行；
+  `ENTRYPOINT` 使用 exec 形式（JSON 数组），保证 `java` 是 1 号进程能收到 `SIGTERM`，
+  从而触发 Spring 的优雅停机
+- **容器间网络**：容器里的 `localhost` 是容器自身，服务之间必须用 compose 的**服务名**
+  （本项目的 `mysql:3306`）；配置通过环境变量注入，应用代码与镜像完全环境无关
+- **启动顺序**：`depends_on` 配 `condition: service_healthy`，等 MySQL 健康检查通过再启动应用，
+  避免"数据库还没初始化完，应用已连接失败退出"
 - **连接池（HikariCP）**：Spring Boot 默认自带。连接池复用连接，
   避免每次请求都做 TCP 握手与认证；配置了最大连接数、最小空闲连接与获取超时
 - **MySQL 连接参数**：`characterEncoding=utf8` 保证中文不乱码，`serverTimezone` 明确时区，

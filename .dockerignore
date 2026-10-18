@@ -1,0 +1,21 @@
+# .dockerignore —— 控制"哪些文件不进构建上下文"
+#
+# ★ 它不是"不影响镜像"那么简单：docker build 会先把整个目录打包发给 Docker 引擎，
+#   这个包叫 build context。上下文越大，传输和构建越慢。
+#   target/ 里有 30MB+ 的 jar、data/ 里有数据库文件、.git/ 里有全部历史，
+#   全都不需要进镜像（镜像里会重新构建）。
+
+target/
+data/
+
+.git/
+.github/
+.vscode/
+
+*.md
+知识点总笔记.txt
+run.ps1
+
+Dockerfile
+.dockerignore
+docker-compose.yml
