@@ -53,8 +53,14 @@ public class OrderService {
      *   因为调用没有经过 Spring 生成的代理对象。所以下面两个重载方法都加了注解，
      *   保证从外部调用任意一个都能开启事务。
      */
+    /** 兼容旧用法：不指定归属人（历史数据 / 未开启鉴权） */
     @Transactional
     public Order createOrder(String id, BigDecimal amount, List<OrderItem> items) {
+        return createOrder(id, amount, items, null);
+    }
+
+    @Transactional
+    public Order createOrder(String id, BigDecimal amount, List<OrderItem> items, String ownerId) {
         if (id == null || id.trim().isEmpty()) {
             throw new IllegalArgumentException("订单号不能为空");
         }
@@ -79,7 +85,7 @@ public class OrderService {
             throw new IllegalArgumentException("订单号已存在：" + id);
         }
 
-        Order order = new Order(id, total, OrderStatus.UNPAID);
+        Order order = new Order(id, total, OrderStatus.UNPAID, ownerId);
         try {
             repository.add(order);
             if (!safeItems.isEmpty()) {
@@ -156,6 +162,16 @@ public class OrderService {
      *     那等于没分页，还可能把内存撑爆）
      */
     public PageResponse<Order> listOrders(int page, int size) {
+        return listOrders(page, size, null);
+    }
+
+    /**
+     * 按归属人分页查询。
+     *
+     * ★ 授权要点：ownerId 由接口层从 JWT 中取出后传进来，【绝不】接受客户端自己传的用户名 ——
+     *   否则客户端传别人的用户名就能查到别人的订单。
+     */
+    public PageResponse<Order> listOrders(int page, int size, String ownerId) {
         if (page < 1) {
             throw new IllegalArgumentException("页码必须大于等于 1");
         }
@@ -164,9 +180,24 @@ public class OrderService {
         }
 
         int offset = (page - 1) * size;          // 第 1 页从第 0 条开始；第 2 页跳过 size 条
-        List<Order> items = repository.listPage(offset, size);
-        long total = repository.count();
+        List<Order> items = (ownerId == null)
+                ? repository.listPage(offset, size)
+                : repository.listPage(offset, size, ownerId);
+        long total = (ownerId == null) ? repository.count() : repository.count(ownerId);
         return new PageResponse<>(items, total, page, size);
+    }
+
+    /**
+     * 判断某笔订单是否属于该用户。
+     * ★ 订单不存在、或属于别人，都返回 false —— 接口层统一转成 404，
+     *   这样不会泄露"这个订单号是存在的"（否则攻击者可以枚举订单号）。
+     */
+    public boolean isOwnedBy(String id, String ownerId) {
+        if (ownerId == null) {
+            return true;                        // 未开启鉴权（测试环境）时不做归属校验
+        }
+        Order order = repository.get(id);
+        return order != null && ownerId.equals(order.getOwnerId());
     }
 
     /**
@@ -198,8 +229,14 @@ public class OrderService {
 
     /** 统计某个状态下的订单总金额。 */
     public BigDecimal sumAmount(OrderStatus status) {
+        return sumAmount(status, null);
+    }
+
+    /** 只统计该用户的订单金额 */
+    public BigDecimal sumAmount(OrderStatus status, String ownerId) {
         BigDecimal sum = BigDecimal.ZERO;
-        for (Order order : repository.listAll()) {
+        List<Order> orders = (ownerId == null) ? repository.listAll() : repository.listAll(ownerId);
+        for (Order order : orders) {
             if (order.getStatus() == status) {
                 // ★ BigDecimal 不可变：add 返回新对象，必须接收返回值！
                 //   写成 sum.add(...) 会静默失效（sum 还是 0），是极常见的低级错误

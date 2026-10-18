@@ -44,6 +44,7 @@ class OrderControllerTest {
         // ★ 顺序不能反：order_items 有外键指向 orders，必须先删明细，再删订单
         jdbc.update("DELETE FROM order_items");
         jdbc.update("DELETE FROM orders");
+        jdbc.update("DELETE FROM users");
     }
 
     /** 简写，让测试里的金额更像钱：money("100") */

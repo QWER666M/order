@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestAttribute;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
@@ -41,13 +42,20 @@ public class OrderController {
         this.service = service;
     }
 
-    /** GET /orders —— 分页查看订单，支持 ?page=1&size=10（都有默认值） */
+    /**
+     * GET /orders —— 分页查看【当前登录用户】的订单。
+     *
+     * @RequestAttribute("currentUsername") 是拦截器校验 token 后放进 request 的，
+     * 客户端【无法伪造】—— 想改成别人的名字，只能伪造 token，而 token 是签过名的。
+     * required = false：测试环境关闭鉴权时没有这个属性，此时 user 为 null（不按归属过滤）。
+     */
     @GetMapping
     public PageResponse<OrderResponse> list(
             @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "10") int size) {
+            @RequestParam(defaultValue = "10") int size,
+            @RequestAttribute(name = AuthInterceptor.ATTR_USERNAME, required = false) String user) {
         // 先拿到"业务对象的一页"，再整体映射成"对外的一页"（PageResponse.map）
-        return service.listOrders(page, size).map(OrderResponse::from);
+        return service.listOrders(page, size, user).map(OrderResponse::from);
     }
 
     /**
@@ -59,7 +67,8 @@ public class OrderController {
      */
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
-    public OrderResponse create(@RequestBody CreateOrderRequest request) {
+    public OrderResponse create(@RequestBody CreateOrderRequest request,
+                                @RequestAttribute(name = AuthInterceptor.ATTR_USERNAME, required = false) String user) {
         // DTO（对外契约）-> 实体（内部模型）
         List<OrderItem> items = (request.items() == null)
                 ? List.of()
@@ -67,13 +76,19 @@ public class OrderController {
                         .map(i -> new OrderItem(i.productName(), i.price(), i.quantity()))
                         .toList();
 
-        Order created = service.createOrder(request.id(), request.amount(), items);
+        Order created = service.createOrder(request.id(), request.amount(), items, user);
         return OrderResponse.from(created);
     }
 
-    /** GET /orders/{id} —— 查询订单详情（含明细）；查不到返回 404 */
+    /** GET /orders/{id} —— 查询订单详情（含明细）；不是自己的订单也返回 404 */
     @GetMapping("/{id}")
-    public OrderDetailResponse getOne(@PathVariable String id) {
+    public OrderDetailResponse getOne(@PathVariable String id,
+                                      @RequestAttribute(name = AuthInterceptor.ATTR_USERNAME, required = false) String user) {
+        // ★ 别人的订单统一返回 404（而不是 403）：
+        //   403 等于告诉攻击者"这个订单号存在，只是你没权限"，可以被用来枚举订单。
+        if (!service.isOwnedBy(id, user)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在：" + id);
+        }
         Order order = service.findOrder(id);
         if (order == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在：" + id);
@@ -82,9 +97,13 @@ public class OrderController {
         return OrderDetailResponse.from(order, service.findOrderItems(id));
     }
 
-    /** POST /orders/{id}/pay —— 支付；失败返回 409（冲突） */
+    /** POST /orders/{id}/pay —— 支付；不是自己的订单返回 404，状态冲突返回 409 */
     @PostMapping("/{id}/pay")
-    public Map<String, Object> pay(@PathVariable String id) {
+    public Map<String, Object> pay(@PathVariable String id,
+                                   @RequestAttribute(name = AuthInterceptor.ATTR_USERNAME, required = false) String user) {
+        if (!service.isOwnedBy(id, user)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在：" + id);
+        }
         if (!service.pay(id)) {
             throw new ResponseStatusException(
                     HttpStatus.CONFLICT,
@@ -93,9 +112,13 @@ public class OrderController {
         return Map.of("message", "支付成功", "order", OrderResponse.from(service.findOrder(id)));
     }
 
-    /** POST /orders/{id}/cancel —— 取消；失败返回 409（冲突） */
+    /** POST /orders/{id}/cancel —— 取消；不是自己的订单返回 404，状态冲突返回 409 */
     @PostMapping("/{id}/cancel")
-    public Map<String, Object> cancel(@PathVariable String id) {
+    public Map<String, Object> cancel(@PathVariable String id,
+                                      @RequestAttribute(name = AuthInterceptor.ATTR_USERNAME, required = false) String user) {
+        if (!service.isOwnedBy(id, user)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在：" + id);
+        }
         if (!service.cancel(id)) {
             throw new ResponseStatusException(
                     HttpStatus.CONFLICT,
@@ -104,13 +127,14 @@ public class OrderController {
         return Map.of("message", "取消成功", "order", OrderResponse.from(service.findOrder(id)));
     }
 
-    /** GET /orders/stats —— 按状态统计总金额 */
+    /** GET /orders/stats —— 按状态统计【当前用户】的总金额 */
     @GetMapping("/stats")
-    public Map<String, BigDecimal> stats() {
+    public Map<String, BigDecimal> stats(
+            @RequestAttribute(name = AuthInterceptor.ATTR_USERNAME, required = false) String user) {
         return Map.of(
-                "unpaid", service.sumAmount(OrderStatus.UNPAID),
-                "paid", service.sumAmount(OrderStatus.PAID),
-                "cancelled", service.sumAmount(OrderStatus.CANCELLED)
+                "unpaid", service.sumAmount(OrderStatus.UNPAID, user),
+                "paid", service.sumAmount(OrderStatus.PAID, user),
+                "cancelled", service.sumAmount(OrderStatus.CANCELLED, user)
         );
     }
 }

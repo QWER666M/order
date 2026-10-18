@@ -19,6 +19,7 @@
   十三、并发安全（"先查后改"陷阱）
   十四、从 H2 迁移到 MySQL（Profile / Docker / 连接池）
   十五、订单明细（1:N）与事务
+  十六、认证（Authentication）与授权（Authorization）
 
 
 ============================================================
@@ -1520,6 +1521,168 @@ Q10 什么是依赖注入？
 
 
 ============================================================
+十六、认证（Authentication）与授权（Authorization）
+============================================================
+
+【16.1 两个词必须分清】
+
+  认证 Authentication —— "你是谁？"        证明身份     登录 + JWT 验签
+  授权 Authorization  —— "你能干什么？"    决定权限     订单 owner_id 过滤
+
+  ★ 只有认证不够：能登录 ≠ 能看所有人的订单。
+
+【16.2 密码怎么存（三种错误 + 一种正确）】
+
+  ❌ 明文存储            数据库泄露 = 密码全泄露
+  ❌ MD5 / SHA-256       没有盐，彩虹表可反查；且"快"正适合暴力破解
+  ❌ 全局固定盐          同一密码哈希相同，仍可批量破解
+  ✅ BCrypt              慢（可调成本因子）+ 每次随机盐
+
+      String hash = encoder.encode(rawPassword);       // 注册
+      boolean ok  = encoder.matches(rawPassword, hash);// 登录
+
+  为什么"慢"是优点？
+      MD5 每秒能算几十亿次，BCrypt 每秒只能算几千次 —— 暴力破解成本差几个数量级。
+  为什么随机盐有用？
+      同一密码两次 encode 结果不同，彩虹表（预先算好的哈希表）失效。
+  为什么不可逆？
+      拿到 $2a$10$... 推不出原文，只能"用原文再算一次比对"。
+
+  ★ 登录失败不要区分"用户不存在"和"密码错误"
+      分别提示等于告诉攻击者哪些用户名有效（用户枚举）。
+      两者统一返回"用户名或密码错误"。
+
+【16.3 JWT 结构与原理】
+
+  三段，用 . 分隔：  header . payload . signature
+
+      header    : {"alg":"HS256"}
+      payload   : {"sub":"alice","role":"USER","exp":...}
+      signature : 用【服务端密钥】对前两段做 HMAC
+
+  ★★ 最重要的一句话：JWT 是【签名】，不是【加密】！
+      payload 只是 Base64 编码，任何人都能解开看内容：
+          echo "eyJzdWIiOiJhbGljZSJ9" | base64 -d   ->  {"sub":"alice"}
+      所以 token 里【绝不能放密码、身份证、手机号】等敏感信息。
+
+  那安全性从哪来？签名。
+      攻击者把 payload 里的 sub 从 alice 改成 admin
+      -> payload 变了 -> 签名对不上 -> 验签失败 -> 401
+      除非他拿到服务端密钥，否则改不了内容。
+
+  密钥要求：HS256 需要 >= 256 位（32 字节）。
+      本项目在构造时就直接创建 SecretKey，密钥太短会启动失败 —— 这是好事，
+      防止"弱密钥上线"这种问题被带进生产。
+
+  ★ JWT vs Session
+      Session：状态存在【服务端】内存/Redis，多台服务器要共享，可以主动踢人
+      JWT    ：状态在【客户端】，服务端只验签（无状态），扩容简单，
+               但"主动让某个 token 失效"很难（只能等过期或维护黑名单）
+
+【16.4 一次请求的完整链路（本项目真实流程）】
+
+      GET /orders
+      Authorization: Bearer eyJhbGci...
+            |
+            v
+      AuthInterceptor.preHandle()
+        1. 有 Authorization 头吗？          没有 -> 401
+        2. 是 "Bearer " 开头吗？            不是 -> 401
+        3. 验签 + 检查过期                  失败 -> 401
+        4. request.setAttribute("currentUsername", "alice")
+            |
+            v
+      OrderController.list(@RequestAttribute("currentUsername") String user)
+            |
+            v
+      service.listOrders(page, size, user)
+            |
+            v
+      SELECT ... WHERE owner_id = 'alice' ORDER BY seq LIMIT ? OFFSET ?
+
+  ★★ 核心原则：身份信息必须来自【服务端认证过的凭据】，
+    绝不能接受客户端自称的身份（如 ?username=alice）。
+
+【16.5 拦截器 vs 过滤器（面试常问）】
+
+  Filter       Servlet 层，包裹所有请求，看不到 Spring 的 Controller 方法
+  Interceptor  Spring MVC 层，能看到 handler（Controller 方法），能读方法上的注解，
+               更适合做"接口级鉴权"
+
+  本项目用 HandlerInterceptor，因为它足够简单且流程透明；
+  真实项目常用 Spring Security 的过滤器链（功能更全：CSRF、方法级权限 @PreAuthorize 等）。
+
+  ★ 拦截器里 return false 之后，@RestControllerAdvice 不会生效
+    （异常处理是 Controller 层的事），所以 401 的 JSON 要自己写：
+        response.setStatus(401);
+        response.setContentType("application/json;charset=UTF-8");
+        objectMapper.writeValue(response.getWriter(), Map.of("error", msg));
+
+【16.6 状态码怎么选：401 / 403 / 404】
+
+  401 Unauthorized  未认证：没 token / token 无效 / 已过期
+  403 Forbidden     已认证但无权限（常见于"角色不够"，如非管理员访问后台）
+  404 Not Found     资源不存在
+
+  ★ 本项目"访问别人的订单"返回 404，而不是 403：
+      如果返回 403，攻击者可以通过 403/404 的差异判断哪些订单号存在（订单号枚举）。
+      统一 404 = 不泄露"资源是否存在"。
+
+【16.7 数据隔离要落在 SQL 里】
+
+  ❌ 查全部再内存过滤：
+        repository.listAll().stream().filter(o -> user.equals(o.getOwnerId()))
+     10 万条订单 = 把 10 万条读进内存，慢且可能 OOM
+  ✅ 数据库过滤：
+        SELECT ... FROM orders WHERE owner_id = ? ORDER BY seq LIMIT ? OFFSET ?
+
+  ★ 和"真分页 vs 假分页"是同一个道理：能在数据库做的，不要拉到应用层做。
+
+【16.8 测试策略：加一个开关】
+
+  两类测试：
+      OrderServiceTest / OrderControllerTest  -> app.auth.enabled=false（专注业务）
+      AuthApiTest                             -> @SpringBootTest(properties="app.auth.enabled=true")
+
+  为什么不全部打开？
+      39 个业务测试每个都要带 token，改动量大且与业务无关。
+      测试原则：一个测试只验证一件事。鉴权由专门的测试类覆盖。
+
+  ★ MockMvc 加请求头：
+        mockMvc.perform(get("/orders").header("Authorization", "Bearer " + token))
+
+【16.9 又一次踩到"测试配置完全遮蔽主配置"】
+
+  启动报错：Could not resolve placeholder 'app.jwt.secret'
+  原因：src/test/resources/application.properties 与主配置【同名】，
+        它把主配置【整份遮蔽】（不是合并），所以主配置里的 app.jwt.* 在测试中读不到。
+  解决：测试配置里也写一份 app.jwt.secret / app.jwt.expire-minutes。
+
+  ★ 记住：同名配置文件"前者完全覆盖后者"，不是"两个文件合并"。
+
+【16.10 安全清单（面试可直接背）】
+
+  1. 密码 BCrypt 哈希            防：数据库泄露后明文密码
+  2. 登录失败不区分原因          防：用户枚举
+  3. JWT 只放非敏感信息          防：token 被解码后泄露隐私
+  4. HS256 签名                  防：篡改 payload
+  5. 身份取自 token，不取参数    防：冒充他人
+  6. 他人资源返回 404            防：订单号枚举
+  7. 过滤条件写进 SQL WHERE      防：越权 + 性能问题
+  8. 密钥走配置、不进代码库      防：密钥泄露
+
+【16.11 实测结果（本项目真机验证）】
+
+  注册 alice / bob -> 各自拿到 3 段式 token
+  alice 创建 A-ALICE(100.00)
+      alice 列表: total=1        bob 列表: total=0
+      bob 查详情: 404            bob 支付: 404
+      alice 支付: 200            alice 统计 100.00 / bob 统计 0
+  密码错误: 401                  篡改 token: 401
+  测试总数 39 -> 50 全绿（新增 AuthApiTest 11 个）
+
+
+============================================================
 【学习历程回顾】
 ============================================================
 
@@ -1546,6 +1709,7 @@ Q10 什么是依赖注入？
                                   ★ 已用独立的临时 MySQL 实例完成端到端验证
   Step 17 订单明细与事务          1:N 外键、@Transactional 回滚、服务端计算金额、避免 N+1
                                   ★ 实测：去掉 @Transactional 后立刻出现"无明细的半截订单"
+  Step 18 认证与授权              BCrypt、JWT（签名非加密）、拦截器、数据隔离、401/403/404
 
 ============================================================
   笔记结束。卡住的时候先翻"常见坑清单"，再去"面试问答"自测。

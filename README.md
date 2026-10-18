@@ -8,6 +8,9 @@
 ## 功能特性
 
 - **创建订单**：自动校验订单号非空、不重复，金额必须大于 0
+- **用户体系与 JWT 鉴权**：注册 / 登录签发 JWT；`/orders/**` 需携带 `Authorization: Bearer <token>`，
+  未登录返回 401；密码使用 **BCrypt** 哈希存储
+- **数据隔离**：每个用户只能查询、支付、取消**自己**的订单；访问他人订单统一返回 404（不泄露订单是否存在）
 - **订单明细**：一个订单可包含多条商品明细，总价由**服务端**按「单价 × 数量」计算
 - **查询订单**：支持按订单号查询单笔、分页查询订单列表
 - **支付订单**：仅允许「待支付」状态的订单支付
@@ -35,6 +38,8 @@
 | JUnit 5 | 5.11+ | 单元测试 |
 | springdoc-openapi | 2.8.17 | Swagger UI 接口文档 |
 | Docker Compose | — | 一键启动 MySQL 开发环境 |
+| Spring Security Crypto | — | 仅使用 BCrypt 密码哈希 |
+| jjwt | 0.12.7 | JWT 签发与校验 |
 
 ## 架构设计
 
@@ -169,12 +174,50 @@ H2 控制台登录信息（使用 `h2` profile 时）：
 
 | 方法 | 路径 | 说明 | 成功 | 失败 |
 |---|---|---|---|---|
-| GET | `/orders?page=1&size=10` | 分页查询订单列表 | 200 | 400 参数不合法 |
-| POST | `/orders` | 创建订单（可带明细） | 201 | 400 参数不合法 |
-| GET | `/orders/{id}` | 查询订单详情（含明细） | 200 | 404 订单不存在 |
-| POST | `/orders/{id}/pay` | 支付订单 | 200 | 409 状态冲突 |
-| POST | `/orders/{id}/cancel` | 取消订单 | 200 | 409 状态冲突 |
-| GET | `/orders/stats` | 按状态统计金额 | 200 | — |
+| GET | `/orders` | 分页查询**当前用户**的订单 | 200 | 400 参数不合法 / 401 未登录 |
+| POST | `/orders` | 创建订单（可带明细） | 201 | 400 参数不合法 / 401 未登录 |
+| GET | `/orders/{id}` | 查询订单详情（含明细） | 200 | 401 未登录 / 404 订单不存在或无权限 |
+| POST | `/orders/{id}/pay` | 支付订单 | 200 | 401 未登录 / 404 无权限 / 409 状态冲突 |
+| POST | `/orders/{id}/cancel` | 取消订单 | 200 | 401 未登录 / 404 无权限 / 409 状态冲突 |
+| GET | `/orders/stats` | 按状态统计**当前用户**金额 | 200 | 401 未登录 |
+| POST | `/auth/register` | 注册并返回 token | 201 | 400 用户名/密码不合法 |
+| POST | `/auth/login` | 登录并返回 token | 200 | 401 用户名或密码错误 |
+
+### 认证
+
+除 `/auth/**`、Swagger、H2 控制台外，所有接口都需要 JWT。
+
+**1) 注册（或登录）拿到 token**
+
+```bash
+curl -X POST http://localhost:8080/auth/register \
+     -H "Content-Type: application/json" \
+     -d '{"username":"alice","password":"secret123"}'
+```
+
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSIsInJvbGUiOiJVU0VSIn0.xxxxx",
+  "username": "alice",
+  "role": "USER"
+}
+```
+
+**2) 后续请求带上 token**
+
+```bash
+curl http://localhost:8080/orders \
+     -H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9..."
+```
+
+| 情况 | 响应 |
+|---|---|
+| 未带 `Authorization` 头 | `401 {"error":"未登录：请在 Authorization 头中提供 Bearer token"}` |
+| token 无效 / 被篡改 / 过期 | `401 {"error":"登录已失效，请重新登录"}` |
+| 访问他人的订单 | `404 {"error":"订单不存在：xxx"}`（**故意不用 403**，避免泄露订单是否存在） |
+
+> ⚠️ **JWT 是签名，不是加密**：payload 只是 Base64 编码，任何人都能解开。
+> 因此 token 中**只放用户名和角色**，绝不放密码等敏感信息。
 
 ### 请求示例
 
@@ -287,6 +330,9 @@ curl "http://localhost:8080/orders?page=1&size=10"
 | 订单号重复 | 400 | `{"error": "订单号已存在：A001"}` |
 | 订单不存在 | 404 | `{"error": "订单不存在：A001"}` |
 | 状态冲突（重复支付/取消已支付订单） | 409 | `{"error": "支付失败：订单不存在或不是待支付状态"}` |
+| 未登录 / token 无效 | 401 | `{"error": "登录已失效，请重新登录"}` |
+| 登录密码错误 | 401 | `{"error": "用户名或密码错误"}` |
+| 访问他人订单 | 404 | `{"error": "订单不存在：A001"}` |
 | 请求体 JSON 格式错误 | 400 | `{"error": "Bad Request"}` |
 | 请求方法不支持 | 405 | `{"error": "Method Not Allowed"}` |
 | 请求 Content-Type 不支持 | 415 | `{"error": "Unsupported Media Type"}` |
@@ -344,9 +390,21 @@ order-app/
     │   │   ├── OrderRepository.java         数据层（数据库访问）
     │   │   ├── Order.java                   订单实体（内部模型）
     │   │   ├── OrderItem.java               订单明细实体（1:N）
+    │   │   ├── User.java                    用户实体
     │   │   ├── OrderStatus.java             订单状态枚举
+    │   │   ├── UserService.java             注册 / 登录（BCrypt 校验）
+    │   │   ├── UserRepository.java          用户数据访问
+    │   │   ├── JwtService.java              JWT 签发与验签
+    │   │   ├── AuthController.java          /auth/register、/auth/login
+    │   │   ├── AuthInterceptor.java         校验 Bearer token
+    │   │   ├── WebConfig.java               注册拦截器与放行路径
+    │   │   ├── PasswordEncoderConfig.java   BCrypt Bean
+    │   │   ├── LoginFailedException.java    登录失败（映射为 401）
     │   │   ├── ApiExceptionHandler.java     全局异常处理
     │   │   └── dto/
+    │   │       ├── RegisterRequest.java      注册入参
+    │   │       ├── LoginRequest.java         登录入参
+    │   │       ├── AuthResponse.java         登录/注册出参（token）
     │   │       ├── CreateOrderRequest.java   创建订单入参（可含 items）
     │   │       ├── CreateOrderItemRequest.java  单条明细入参
     │   │       ├── OrderResponse.java        列表用出参（不含明细）
@@ -360,7 +418,8 @@ order-app/
     └── test/
         ├── java/com/example/order/
         │   ├── OrderServiceTest.java        业务层测试（含并发测试）
-        │   └── OrderControllerTest.java     接口层测试（MockMvc）
+        │   ├── OrderControllerTest.java     接口层测试（MockMvc）
+        │   └── AuthApiTest.java             认证与授权测试（开启鉴权）
         └── resources/
             └── application.properties       测试专用配置（H2 内存库）
 ```
@@ -368,11 +427,20 @@ order-app/
 ## 数据库设计
 
 ```sql
+CREATE TABLE users (
+    id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+    username      VARCHAR(64)  NOT NULL UNIQUE,
+    password_hash VARCHAR(100) NOT NULL,   -- BCrypt 哈希（60 字符）
+    role          VARCHAR(16)  NOT NULL,   -- USER / ADMIN
+    created_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE orders (
     seq    BIGINT AUTO_INCREMENT PRIMARY KEY,  -- 自增序号，保证查询顺序
     id     VARCHAR(64) NOT NULL UNIQUE,        -- 订单号
     amount DECIMAL(12,2) NOT NULL,              -- 金额：DECIMAL(总位数, 小数位数)，精确十进制
-    status VARCHAR(16) NOT NULL                -- 状态
+    status VARCHAR(16) NOT NULL,                -- 状态
+    owner_id VARCHAR(64) NULL                   -- 下单用户；NULL = 历史数据/未鉴权
 );
 
 CREATE TABLE order_items (
@@ -400,7 +468,7 @@ CREATE TABLE order_items (
 
 ## 测试
 
-共 **39 个测试**，分为两层：
+共 **50 个测试**，分三层：
 
 ### 业务层测试 `OrderServiceTest`（18 个）
 
@@ -448,6 +516,24 @@ CREATE TABLE order_items (
 | `create_withItems_returns201AndComputedAmount` | 带明细创建返回 201，金额为服务端算出的 23.50 |
 | `getOne_returnsItems` | 详情接口返回明细及服务端计算的小计 |
 | `list_doesNotIncludeItems` | 列表接口不返回明细（避免 N+1 查询） |
+
+### 认证与授权测试 `AuthApiTest`（11 个）
+
+单独用 `@SpringBootTest(properties = "app.auth.enabled=true")` 打开鉴权，验证真实的安全行为：
+
+| 测试 | 验证内容 |
+|---|---|
+| `register_thenLogin_success` | 注册后可登录，返回 token，且响应不含 `passwordHash` |
+| `register_duplicateUsername_returns400` | 用户名重复返回 400 |
+| `login_wrongPassword_returns401` | 密码错误返回 401 |
+| `login_unknownUser_returns401WithSameMessage` | 用户不存在与密码错误返回**同一提示**（防用户枚举） |
+| `orders_withoutToken_returns401` | 未带 token 访问业务接口返回 401 |
+| `orders_withInvalidToken_returns401` | 无效 token 返回 401 |
+| `orders_withTamperedToken_returns401` | **篡改 token 后验签失败**，返回 401 |
+| `orders_withToken_returns200` | 带合法 token 正常访问 |
+| **`userCannotSeeOrTouchAnotherUsersOrder`** | **越权隔离**：B 看不到、查不到、也支付/取消不了 A 的订单 |
+| `stats_onlyCountsCurrentUsersOrders` | 统计接口只统计自己的订单 |
+| `authEndpoints_arePublic` | `/auth/**` 无需 token（否则无法登录） |
 | `pay_success_returns200` | 支付成功返回 200 |
 | `pay_alreadyPaid_returns409` / `pay_orderNotFound_returns409` | 状态冲突返回 409 |
 | `cancel_success_returns200` | 取消成功返回 200 |
@@ -484,6 +570,15 @@ mvn test -Dtest=OrderServiceTest#pay_concurrentOnlyOneSucceeds   # 只跑某一�
   `allowPublicKeyRetrieval=true` 用于 MySQL 8 默认的 `caching_sha2_password` 插件在非 SSL 连接下的握手
 - **容器化数据库**：`docker-compose.yml` 声明 MySQL 服务，含**健康检查**（容器"起来"≠数据库"可用"）、
   具名数据卷（容器删除后数据仍在）与 utf8mb4 字符集
+- **JWT 无状态认证**：登录签发 HS256 签名的 token，拦截器验签后把用户名放进 request 属性。
+  身份信息**只从 token 取**，绝不接受客户端传入的用户名 —— 否则可以冒充他人。
+  密钥通过配置注入（生产应使用环境变量/配置中心），且长度不足 32 字符会在启动时直接失败
+- **密码安全**：使用 **BCrypt** 存储哈希 —— 它刻意设计得慢（抵抗暴力破解）且自带随机盐（抵抗彩虹表）。
+  登录失败时对「用户不存在」与「密码错误」返回**同一提示**，避免用户枚举
+- **数据隔离**：订单查询把 `WHERE owner_id = ?` 写在 SQL 里（不是查出来再内存过滤）；
+  访问他人订单统一返回 **404 而非 403**，避免泄露订单是否存在
+- **鉴权开关**：`app.auth.enabled` 控制拦截器是否注册。
+  业务测试保持关闭（专注业务逻辑），`AuthApiTest` 通过 `@SpringBootTest(properties=...)` 单独开启
 - **不可变设计**：订单号与金额使用 `final` 修饰，创建后不可修改；订单号作为数据主键，不可变性尤为重要
 - **分页查询**：列表接口支持 `page` / `size` 参数，由数据库执行 `LIMIT ? OFFSET ?`，
   只取需要的那一页，避免把全表读进内存。分页参数在业务层校验（页码 ≥ 1、每页 1~100），

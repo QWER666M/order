@@ -21,7 +21,8 @@ public class OrderRepository {
     private static final RowMapper<Order> TO_ORDER = (rs, rowNum) -> new Order(
             rs.getString("id"),
             rs.getBigDecimal("amount"),                 // 金额用 getBigDecimal，与 DECIMAL 列对应
-            OrderStatus.valueOf(rs.getString("status"))
+            OrderStatus.valueOf(rs.getString("status")),
+            rs.getString("owner_id")
     );
 
     /** 把明细表的一行，变成一个 OrderItem 对象 */
@@ -40,10 +41,11 @@ public class OrderRepository {
 
     /** 存一笔新订单（INSERT） */
     public void add(Order order) {
-        jdbc.update("INSERT INTO orders (id, amount, status) VALUES (?, ?, ?)",
+        jdbc.update("INSERT INTO orders (id, amount, status, owner_id) VALUES (?, ?, ?, ?)",
                 order.getId(),
                 order.getAmount(),
-                order.getStatus().name());
+                order.getStatus().name(),
+                order.getOwnerId());
     }
 
     /**
@@ -64,13 +66,20 @@ public class OrderRepository {
     /** 按订单号取一笔；没有就返回 null */
     public Order get(String id) {
         List<Order> found = jdbc.query(
-                "SELECT id, amount, status FROM orders WHERE id = ?", TO_ORDER, id);
+                "SELECT id, amount, status, owner_id FROM orders WHERE id = ?", TO_ORDER, id);
         return found.isEmpty() ? null : found.get(0);
     }
 
     /** 取全部订单，按插入顺序（seq 是自增主键，等价于原来 LinkedHashMap 的顺序） */
     public List<Order> listAll() {
-        return jdbc.query("SELECT id, amount, status FROM orders ORDER BY seq", TO_ORDER);
+        return jdbc.query("SELECT id, amount, status, owner_id FROM orders ORDER BY seq", TO_ORDER);
+    }
+
+    /** 取某个用户的全部订单（统计用） */
+    public List<Order> listAll(String ownerId) {
+        return jdbc.query(
+                "SELECT id, amount, status, owner_id FROM orders WHERE owner_id = ? ORDER BY seq",
+                TO_ORDER, ownerId);
     }
 
     /**
@@ -82,13 +91,33 @@ public class OrderRepository {
      */
     public List<Order> listPage(int offset, int limit) {
         return jdbc.query(
-                "SELECT id, amount, status FROM orders ORDER BY seq LIMIT ? OFFSET ?",
+                "SELECT id, amount, status, owner_id FROM orders ORDER BY seq LIMIT ? OFFSET ?",
                 TO_ORDER, limit, offset);
+    }
+
+    /**
+     * 按归属人分页查询：只返回这个用户的订单。
+     *
+     * ★ 过滤条件必须写在 SQL 的 WHERE 里，不能"查全部再在内存里筛"——
+     *   否则数据量大时既慢又占内存，而且容易漏。
+     */
+    public List<Order> listPage(int offset, int limit, String ownerId) {
+        return jdbc.query(
+                "SELECT id, amount, status, owner_id FROM orders WHERE owner_id = ? "
+                        + "ORDER BY seq LIMIT ? OFFSET ?",
+                TO_ORDER, ownerId, limit, offset);
     }
 
     /** 一共多少笔（用 long：记录数可能超过 int 上限） */
     public long count() {
         Long total = jdbc.queryForObject("SELECT COUNT(*) FROM orders", Long.class);
+        return total == null ? 0L : total;
+    }
+
+    /** 某个用户的订单总数 */
+    public long count(String ownerId) {
+        Long total = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM orders WHERE owner_id = ?", Long.class, ownerId);
         return total == null ? 0L : total;
     }
 

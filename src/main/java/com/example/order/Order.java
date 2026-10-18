@@ -17,11 +17,18 @@ public class Order {
     private final String id;
     private final BigDecimal amount;
     private OrderStatus status;
+    /** 下单用户（用户名）。null 表示历史数据 / 匿名订单 / 未开启鉴权时创建 */
+    private final String ownerId;
 
     public Order(String id, BigDecimal amount, OrderStatus status) {
+        this(id, amount, status, null);
+    }
+
+    public Order(String id, BigDecimal amount, OrderStatus status, String ownerId) {
         this.id = id;
         this.amount = amount;
         this.status = status;
+        this.ownerId = ownerId;
     }
 
     public String getId() {
@@ -34,6 +41,10 @@ public class Order {
 
     public OrderStatus getStatus() {
         return status;
+    }
+
+    public String getOwnerId() {
+        return ownerId;
     }
 
     // 状态只能通过这个方法修改，外部不能直接赋值

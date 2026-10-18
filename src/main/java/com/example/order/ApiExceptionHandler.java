@@ -43,6 +43,13 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         return error(HttpHeaders.EMPTY, HttpStatus.BAD_REQUEST, e.getMessage(), "请求参数不合法");
     }
 
+    /** 登录失败（用户名或密码错误）-> 401（身份未通过验证，与 400 的"参数格式错"区分开） */
+    @ExceptionHandler(LoginFailedException.class)
+    public ResponseEntity<Object> handleLoginFailed(LoginFailedException e) {
+        log.warn("登录失败：{}", e.getMessage());
+        return error(HttpHeaders.EMPTY, HttpStatus.UNAUTHORIZED, e.getMessage(), "用户名或密码错误");
+    }
+
     /**
      * 接口层显式抛出的状态异常 -> 沿用异常自带的状态码（404 订单不存在、409 状态冲突）。
      */
