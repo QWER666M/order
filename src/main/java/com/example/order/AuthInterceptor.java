@@ -92,7 +92,18 @@ public class AuthInterceptor implements HandlerInterceptor {
         }
     }
 
-    /** 手写 401 响应：拦截器里抛异常不会走到 @RestControllerAdvice，所以这里直接写 JSON */
+    /**
+     * 手写 401 响应。
+     *
+     * ★ 更正一个曾经写错的注释：这里以为"拦截器里抛异常不会走到 @RestControllerAdvice"，
+     *   实测是【会】的 —— DispatcherServlet 把 applyPreHandle 放在 try 块内，
+     *   拦出异常后同样交给 HandlerExceptionResolver，@ExceptionHandler 照样生效。
+     *
+     *   那为什么还要手写？两个理由：
+     *   1) 拦截器可能在异常处理器之外被复用（例如用在过滤器链里），行为更可控
+     *   2) 不必依赖"某段框架源码恰好把调用包在 try 里"这种隐含前提
+     *   代价是这段 JSON 的构造方式和全局处理器重复了一次。
+     */
     private void writeUnauthorized(HttpServletResponse response, String message) throws IOException {
         response.setStatus(HttpStatus.UNAUTHORIZED.value());
         response.setContentType("application/json;charset=UTF-8");
