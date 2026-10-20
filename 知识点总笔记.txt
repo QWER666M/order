@@ -2010,6 +2010,124 @@ Q10 什么是依赖注入？
        但不能代付（资金操作必须本人发起）。"
 
 
+============================================================
+十七、定时任务（@Scheduled）：功能开发的标准套路
+============================================================
+
+【17.1 一个功能要改几个文件？取决于它跨几层】
+
+  拿到需求先问 6 个问题，文件自然就出来了：
+
+     1) 数据够不够？         缺字段/缺表 -> schema.sql
+     2) 谁触发？             用户 -> Controller；时间 -> Job；消息 -> Consumer
+     3) 规则是什么？         -> Service（用中文先写清一句话）
+     4) 怎么读/写？          -> Repository（SQL）
+     5) 对外长什么样？        -> dto/（XxxRequest / XxxResponse）
+     6) 怎么证明对？          -> Test
+
+  ★ 施工顺序 = 从下往上（依赖倒序），否则会被"找不到方法"追着跑：
+        schema.sql -> Repository -> Service -> 入口(Controller/Job) -> Test
+
+  ★ 改动文件数量取决于"跨几层"，不取决于难度：
+       列表多一个字段        2 个（DTO + Test）
+       加一个查询接口        3 个（Controller + Repository + Test）
+       加一条业务规则        2 个（Service + Test）
+       超时自动取消（本例）  5 个（schema + Repo + Service + Job + Test）
+
+【17.2 本例：超时未支付订单自动取消】
+
+  链路：
+      OrderCleanupJob（@Scheduled，只管"什么时候"）
+        -> OrderService.cancelExpiredOrders(expireHours)   （管"多久算超时"）
+        -> OrderRepository.cancelExpired(deadline)          （管"怎么改库"）
+        -> UPDATE orders SET status='CANCELLED'
+           WHERE status='UNPAID' AND created_at < ?
+
+  ★ 致命陷阱：WHERE 里漏掉 status='UNPAID'
+      -> 三天前【已支付】的订单也会被改成已取消：钱收了，货不发。
+      -> 定时任务批量改数据，一错就是一大片，条件必须精确到不能再精确。
+
+  ★ 为什么规则不写在 Job 里？
+      Job 里写规则 -> 想加"管理员手动触发"就得复制一遍规则 -> 早晚不一致。
+      规则留在 Service -> 任何入口都能调，且测试直接测 Service（不用启动定时器）。
+
+【17.3 @Scheduled 的五个要点】
+
+  1) 必须在启动类（或任一 @Configuration）加 @EnableScheduling，
+     否则 @Scheduled 静默失效 —— 不报错，任务永远不跑。这是最常见的坑。
+
+  2) 方法必须 public、无参数、返回 void。
+     因为它是被时钟触发的，没人给它传参；需要的配置用 @Value 注入到字段。
+
+  3) cron 是【6 段】：秒 分 时 日 月 周
+     （Linux crontab 是 5 段，从 crontab 抄 5 段到 Spring 会报错）
+         0 */10 * * * *   = 每 10 分钟的第 0 秒
+
+  4) cron 设为 "-" 可完全禁用（Scheduled.CRON_DISABLED）。
+     测试配置里必须关掉，否则定时器会跟测试抢数据 -> 偶发失败（flaky test）。
+
+  5) 时区显式指定 zone = "Asia/Shanghai"，避免服务器是 UTC 时跑错点。
+
+【17.4 时间相关的测试：怎么"回到过去"】
+
+  createOrder 写入的永远是 CURRENT_TIMESTAMP，
+  要构造"2 天前创建的订单"，只能直接改库：
+
+      jdbc.update("UPDATE orders SET created_at = ? WHERE id = ?",
+              Timestamp.valueOf(LocalDateTime.now().minusDays(2)), "OLD");
+
+  ★ 断言要覆盖三类数据（缺一类就可能漏 bug）：
+       该被取消的            未支付 + 超时
+       不该取消：时间不到     未支付 + 未超时
+       不该取消：状态不对     【已支付】+ 超时
+
+【17.5 ★★ 亲手验证"测试到底能不能抓 bug"】
+
+  做法：故意把 SQL 的 status='UNPAID' 删掉，再跑测试。
+
+  结果（真实）：
+      cancelExpired_cancelsExpiredUnpaidOnly   -> 仍然全绿   （抓不到）
+      cancelExpired_doesNotTouchPaidOrders     -> 变红
+          expected: <0> but was: <1>   已支付的订单不该被取消
+
+  ★ 结论：一个测试能否抓 bug，取决于它的【数据】是否踩到 bug 的触发条件。
+    只测"正常路径"的测试，对"条件写漏"这类 bug 完全免疫。
+
+  ★ 破坏性验证的方法论：
+     要制造【能跑通、但结果错】的 bug，而不是【直接崩溃】。
+     - 第一次我删了个 ? 但参数还是 3 个 -> 报 parameterIndex 错（崩溃），
+       这验证不了测试的业务价值，只验证了"参数个数错会报错"。
+     - 第二次改成 2 个参数、只按时间筛 -> 静默错误 -> 才真正验证了边界用例的价值。
+
+【17.6 另一个坑：Java 目录必须和 package 一致】
+
+  症状：把 OrderCleanupJob.java 建在 src/main/java/com/example/ 下，
+        文件内写 package com.example.order; -> 编译失败。
+  原因：package 声明就是类的全名，编译器按目录找文件。
+  解法：文件必须放在 .../com/example/order/ 目录下。
+
+【17.7 还有一个坑：改了脚本 ≠ 数据库变了】
+
+  现象：schema.sql 里加了 created_at，查库却没有这一列。
+  诊断：比对两个时间
+      schema.sql 的 LastWriteTime          = 19:34:32
+      应用进程的 StartTime                 = 19:29:13   <- 启动早于修改
+  结论：应用读的是启动那一刻的脚本，库在 19:29 就按旧结构建好了。
+  解法：停应用 -> 删 data/orderdb.mv.db -> 重启（schema.sql 会重新执行）。
+
+  ★ 通用判据：只要"启动时间"早于"文件修改时间"，改动一定没生效。
+    对 schema.sql / application.properties / Dockerfile / yml 全都成立。
+
+【17.8 面试话术】
+
+  "超时订单清理我做成定时任务，但 Job 里只有一行调用 Service —— 规则全部在 Service，
+   所以定时触发、以后的管理端手动触发共用同一份逻辑，测试也直接测 Service 不用启定时器。
+   判断条件我写成一条批量 UPDATE：WHERE status='UNPAID' AND created_at < ?，
+   条件放在 SQL 里而不是查出来再筛，既少往返也避免并发窗口。
+   这里我专门写了'已支付订单即使超时也不能被取消'的测试 ——
+   我故意把 status 条件删掉验证过：只有这个用例会红，只测未支付的用例抓不到这个 bug。"
+
+
 
 ============================================================
 【学习历程回顾】
@@ -2046,6 +2164,8 @@ Q10 什么是依赖注入？
   Step 21 容器化                  多阶段构建（Maven 构建 → 仅 JRE 运行）、层缓存、非 root、
                                  exec 形式 ENTRYPOINT；compose 加 app 服务、服务名连库、
                                  depends_on 健康检查
+  Step 22 定时任务                 @Scheduled + @EnableScheduling；规则留在 Service；
+                                 批量 UPDATE 的条件必须精确；用破坏性验证证明边界测试的价值
 
 ============================================================
   笔记结束。卡住的时候先翻"常见坑清单"，再去"面试问答"自测。

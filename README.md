@@ -21,6 +21,9 @@
 - **金额统计**：按订单状态汇总总金额
 - **数据持久化**：使用 MySQL 数据库，服务重启后数据不丢失
 - **并发安全**：通过数据库原子条件更新保证同一笔订单不会被重复支付
+- **超时订单自动取消**：定时任务（默认每 10 分钟）把「未支付且创建超过 24 小时」的订单置为已取消；
+  cron 与超时小时数均可配置，测试环境可完全关闭。判断条件写在 SQL 的 `WHERE` 里，
+  批量更新一次完成（详见[后台任务](#后台任务定时清理)）
 - **统一异常处理**：所有错误响应统一为 `{"error": "..."}` 格式，并保留语义化的 HTTP 状态码
   （400 参数不合法 / 404 资源不存在 / 405 方法不支持 / 409 状态冲突 / 415 媒体类型不支持 / 500 服务器内部错误）。
   实现上继承 `ResponseEntityExceptionHandler`，因此框架自身抛出的标准异常（JSON 格式错误等）
@@ -171,13 +174,13 @@ mysql -u root -p < db/init-mysql.sql
 #### 数据库结构变更后如何重建
 
 `schema.sql` 用的是 `CREATE TABLE IF NOT EXISTS`，**它不会修改已存在的表**。
-所以当表结构变化（例如新增 `owner_id`、新增 `users` / `order_items` 表）时，需要重建库：
+所以当表结构变化（例如新增 `owner_id`、`created_at`，新增 `users` / `order_items` 表）时，需要重建库：
 
 | 环境 | 做法 |
 |---|---|
 | **H2（`h2` profile）** | 停止应用 → 删除 `data/` 目录 → 重新启动即可 |
 | **MySQL** | 执行 `db/init-mysql.sql`（**会清空数据**） |
-| **MySQL（保留数据）** | 手动迁移，例如 `ALTER TABLE orders ADD COLUMN owner_id VARCHAR(64) NULL;` |
+| **MySQL（保留数据）** | 手动迁移，例如 `ALTER TABLE orders ADD COLUMN owner_id VARCHAR(64) NULL;`，<br>`ALTER TABLE orders ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;` |
 
 典型症状：启动或调用接口时报 `Column "OWNER_ID" not found` / `Table "USERS" not found` —— 说明库还是旧结构。
 
@@ -260,6 +263,7 @@ H2 控制台登录信息（使用 `h2` profile 时）：
 | GET | `/orders` | 分页查询**当前用户**的订单 | 200 | 400 参数不合法 / 401 未登录 |
 | POST | `/orders` | 创建订单（可带明细） | 201 | 400 参数不合法 / 401 未登录 |
 | GET | `/orders/{id}` | 查询订单详情（含明细） | 200 | 401 未登录 / 404 订单不存在或无权限 |
+| GET | `/orders/{id}/items` | 只查订单明细（返回数组） | 200 | 401 未登录 / 404 订单不存在或无权限 |
 | POST | `/orders/{id}/pay` | 支付订单 | 200 | 401 未登录 / 404 无权限 / 409 状态冲突 |
 | POST | `/orders/{id}/cancel` | 取消订单 | 200 | 401 未登录 / 404 无权限 / 409 状态冲突 |
 | GET | `/orders/stats` | 按状态统计**当前用户**金额 | 200 | 401 未登录 |
@@ -523,6 +527,44 @@ curl http://localhost:8080/orders/stats
 | `PAID` | 已支付 | 终态 |
 | `CANCELLED` | 已取消 | 终态 |
 
+## 后台任务：定时清理
+
+除了由用户请求触发的 HTTP 接口，系统还有一个**由时间触发**的入口：
+
+```
+每 10 分钟
+   ↓
+OrderCleanupJob            ← 只负责「什么时候跑」，不含任何业务判断
+   ↓ 调用
+OrderService.cancelExpiredOrders(24)   ← 业务规则：「超过 24 小时算超时」
+   ↓
+OrderRepository.cancelExpired(deadline)
+   ↓
+UPDATE orders SET status='CANCELLED'
+WHERE status='UNPAID' AND created_at < ?
+```
+
+**三个条件缺一不可**：只按时间筛会把**已支付**的订单也改成已取消（用户付了钱、订单却显示取消）。
+`status='UNPAID'` 这一个条件就是为此存在的。
+
+### 配置
+
+| 配置项 | 默认值 | 说明 |
+|---|---|---|
+| `app.order.cleanup-cron` | `0 */10 * * * *` | cron 表达式，**6 段**（秒 分 时 日 月 周，比 Linux crontab 多一个"秒"）；设为 `-` 可完全禁用 |
+| `app.order.expire-hours` | `24` | 超过多少小时未支付算超时 |
+
+### 为什么规则不写在 Job 里
+
+`OrderCleanupJob` 里只有一行 `orderService.cancelExpiredOrders(expireHours)`。这样：
+
+- **入口可替换**：以后想加一个「管理员手动触发」的接口，直接调同一个 Service 方法即可，规则不会重复
+- **可测试**：测试直接调 Service，不需要启动定时器
+- **改规则不用重新部署**：超时小时数从配置读
+
+> 这是分层的实际收益，不是理论——本项目最早是控制台程序，迁到 REST 时 `OrderService` 一行没改，
+> 全靠同一个原则。
+
 ## 项目结构
 
 ```
@@ -546,6 +588,7 @@ order-app/
     │   │   ├── OrderItem.java               订单明细实体（1:N）
     │   │   ├── User.java                    用户实体
     │   │   ├── OrderStatus.java             订单状态枚举
+    │   │   ├── OrderCleanupJob.java         定时任务：取消超时未支付订单
     │   │   ├── UserService.java             注册 / 登录（BCrypt 校验）
     │   │   ├── UserRepository.java          用户数据访问
     │   │   ├── JwtService.java              JWT 签发与验签
@@ -600,7 +643,8 @@ CREATE TABLE orders (
     id     VARCHAR(64) NOT NULL UNIQUE,        -- 订单号
     amount DECIMAL(12,2) NOT NULL,              -- 金额：DECIMAL(总位数, 小数位数)，精确十进制
     status VARCHAR(16) NOT NULL,                -- 状态
-    owner_id VARCHAR(64) NULL                   -- 下单用户；NULL = 历史数据/未鉴权
+    owner_id VARCHAR(64) NULL,                  -- 下单用户；NULL = 历史数据/未鉴权
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP  -- 创建时间（判超时用）
 );
 
 CREATE TABLE order_items (
@@ -628,9 +672,9 @@ CREATE TABLE order_items (
 
 ## 测试
 
-共 **65 个测试**，分三层：
+共 **70 个测试**，分三层：
 
-### 业务层测试 `OrderServiceTest`（18 个）
+### 业务层测试 `OrderServiceTest`（20 个）
 
 直接调用 `OrderService` 的 Java 方法，验证业务规则与并发安全：
 
@@ -654,8 +698,10 @@ CREATE TABLE order_items (
 | `pay_concurrentOnlyOneSucceeds` | 20 线程并发支付同一订单，**仅 1 个成功** |
 | `cancel_concurrentOnlyOneSucceeds` | 20 线程并发取消同一订单，**仅 1 个成功** |
 | `createOrder_concurrentSameId_onlyOneSucceeds` | 20 线程并发创建同一订单号，**仅 1 个成功，其余为友好业务错误（不产生 500）** |
+| `cancelExpired_cancelsExpiredUnpaidOnly` | 超时未支付订单被取消；**未超时的不受牵连** |
+| **`cancelExpired_doesNotTouchPaidOrders`** | **已支付的订单即使超时也绝不取消**（删掉 SQL 里的 `status='UNPAID'` 会立刻变红） |
 
-### 接口层测试 `OrderControllerTest`（21 个）
+### 接口层测试 `OrderControllerTest`（24 个）
 
 使用 `MockMvc` 模拟 HTTP 请求，验证**状态码、JSON 字段名、错误格式与 DTO 白名单**：
 
@@ -676,6 +722,9 @@ CREATE TABLE order_items (
 | `create_withItems_returns201AndComputedAmount` | 带明细创建返回 201，金额为服务端算出的 23.50 |
 | `getOne_returnsItems` | 详情接口返回明细及服务端计算的小计 |
 | `list_doesNotIncludeItems` | 列表接口不返回明细（避免 N+1 查询） |
+| `items_found_returns200AndList` | `GET /orders/{id}/items` 返回明细数组（非对象），长度与字段正确 |
+| `items_orderNotFound_returns404` | 订单不存在返回 404 与统一错误格式 |
+| `items_ofOthersOrder_returns404` | **越权查明细同样返回 404**（不泄露订单是否存在） |
 
 ### 认证与授权测试 `AuthApiTest`（11 个）
 
@@ -795,6 +844,14 @@ mvn clean verify
   新增管理接口无需改动拦截器
 - **授权按业务性质分级**：管理员能读任意订单、能取消（运营止损），
   但**不能代付** —— 资金操作必须由订单所属人发起。权限是"能对谁做"，不是"能跳过业务规则"
+- **后台任务与入口可替换**：`OrderCleanupJob` 用 `@Scheduled` 触发，方法体只有一行
+  `orderService.cancelExpiredOrders(...)`。规则在 Service，所以定时触发、以后的管理端手动触发
+  共用同一份逻辑；测试直接调 Service，无需启动定时器
+- **批量更新把条件写进 WHERE**：超时清理用一条
+  `UPDATE ... WHERE status='UNPAID' AND created_at < ?`，而不是"查出来再逐条改"——
+  既少了往返，也避免并发窗口；`status` 条件缺失会把已支付订单误改为已取消，故单独写了测试覆盖
+- **时间相关的测试要"回到过去"**：`createOrder` 写入的永远是 `CURRENT_TIMESTAMP`，
+  所以测试用 `jdbc.update("UPDATE ... SET created_at = ?")` 把时间改到 2 天前来构造超时场景
 - **容器化（多阶段构建）**：`Dockerfile` 分两个阶段 —— 用 `maven` 镜像编译打包，
   再把**一个 jar** 复制进 `eclipse-temurin:21-jre` 运行。最终镜像不含 Maven、依赖缓存与源码，
   也缩小了攻击面 —— CI 实测镜像 **352MB**（若直接用 maven 镜像做运行环境则在 700MB 以上）
