@@ -544,7 +544,7 @@ UPDATE orders SET status='CANCELLED'
 WHERE status='UNPAID' AND created_at < ?
 ```
 
-**三个条件缺一不可**：只按时间筛会把**已支付**的订单也改成已取消（用户付了钱、订单却显示取消）。
+**`WHERE` 里的两个条件缺一不可**：只按时间筛会把**已支付**的订单也改成已取消（用户付了钱、订单却显示取消）。
 `status='UNPAID'` 这一个条件就是为此存在的。
 
 ### 配置
