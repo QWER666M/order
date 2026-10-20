@@ -1,5 +1,5 @@
 package com.example.order;
-
+import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
@@ -14,6 +14,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  *
  * 这套组装关系，无需在 main 里写任何 new。
  */
+@EnableScheduling
 @SpringBootApplication
 public class OrderAppApplication {
 

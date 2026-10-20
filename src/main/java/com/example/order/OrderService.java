@@ -1,6 +1,8 @@
 package com.example.order;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 
 import com.example.order.dto.PageResponse;
@@ -226,6 +228,35 @@ public class OrderService {
         }
         return success;
     }
+    /**
+ * 取消超时未支付的订单。
+ *
+ * ★ 为什么业务规则写在这里，而不是写在定时任务里？
+ *   定时任务只是"入口"（什么时候触发），规则必须放在 Service，
+ *   这样以后 Http 手动触发、CLI 批量跑都能复用同一份规则。
+ */
+private  int cancelExpiredOrders() {
+    return cancelExpiredOrders(24);   // 默认 24 小时
+}
+public int cancelExpiredOrders(int expireHours) {
+    if (expireHours <= 0) {
+        throw new IllegalArgumentException("超时小时数必须大于 0");
+    }
+
+    // ① 算出时间界限：现在减去 expireHours 小时
+    LocalDateTime deadline = LocalDateTime.now().minus(expireHours, ChronoUnit.HOURS);
+
+    // ② 调数据层
+    int cancelled = repository.cancelExpired(deadline);
+
+    // ③ 写日志（有取消才记 info，没有就 debug，避免日志噪音）
+    if (cancelled > 0) {
+        log.info("自动取消超时未支付订单: {} 笔, 界限={}", cancelled, deadline);
+    } else {
+        log.debug("没有超时的未支付订单");
+    }
+    return cancelled;
+}
 
     /** 统计某个状态下的订单总金额。 */
     public BigDecimal sumAmount(OrderStatus status) {

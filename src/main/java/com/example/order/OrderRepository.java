@@ -1,5 +1,6 @@
 package com.example.order;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -61,6 +62,21 @@ public class OrderRepository {
                 id,
                 OrderStatus.UNPAID.name());
         return rows == 1;
+    }
+        /**
+     * 批量取消超时未支付的订单。
+     *
+     * 三个条件缺一不可：
+     *   status = 'UNPAID'      —— 只动未支付的（已支付/已取消的不碰）
+     *   created_at < deadline  —— 只看超过时限的
+     * 返回受影响行数 = 本次取消了几笔。
+     */
+    public int cancelExpired(LocalDateTime deadline) {
+        return jdbc.update(
+                "UPDATE orders SET status = ? WHERE status = ? AND created_at < ?",
+                OrderStatus.CANCELLED.name(),
+                OrderStatus.UNPAID.name(),
+                deadline);
     }
 
     /** 按订单号取一笔；没有就返回 null */

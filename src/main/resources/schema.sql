@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS orders (
     id       VARCHAR(64) NOT NULL UNIQUE,        -- 订单号：唯一约束，数据库层面再兜一层底
     amount   DECIMAL(12,2) NOT NULL,             -- 金额：DECIMAL(总位数, 小数位数)，精确十进制，绝不用 FLOAT/DOUBLE
     status   VARCHAR(16) NOT NULL,               -- 状态：存枚举的 name()，如 UNPAID / PAID / CANCELLED
-    owner_id VARCHAR(64) NULL                    -- 下单用户（用户名）。NULL = 历史数据/匿名订单
+    owner_id VARCHAR(64) NULL,                    -- 下单用户（用户名）。NULL = 历史数据/匿名订单
+    created_at TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 订单明细表：一个订单有多条明细（1:N）

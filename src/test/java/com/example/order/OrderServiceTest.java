@@ -1,6 +1,8 @@
 package com.example.order;
 
 import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 
@@ -387,4 +389,52 @@ class OrderServiceTest {
 
         assertNull(service.findOrder("A001"), "订单应被回滚");
         assertTrue(service.findOrderItems("A001").isEmpty(), "明细也应被回滚");
-    }}
+    }
+
+    // ================= 超时订单自动取消 =================
+
+    /**
+     * 只有「未支付 且 已超时」的订单会被取消。
+     *
+     * ★ 为什么必须手动改 created_at？
+     *   createOrder 写入的是 CURRENT_TIMESTAMP（永远是"现在"），
+     *   要造出"2 天前创建的订单"，只能直接改库。
+     */
+    @Test
+    void cancelExpired_cancelsExpiredUnpaidOnly() throws Exception {
+        service.createOrder("OLD", money("10"));
+        service.createOrder("NEW", money("20"));
+
+        jdbc.update("UPDATE orders SET created_at = ? WHERE id = ?",
+                Timestamp.valueOf(LocalDateTime.now().minusDays(2)), "OLD");
+
+        int cancelled = service.cancelExpiredOrders(24);
+
+        assertEquals(1, cancelled, "只应取消 OLD 一笔");
+        assertEquals(OrderStatus.CANCELLED, service.findOrder("OLD").getStatus(), "超时未支付的应被取消");
+        assertEquals(OrderStatus.UNPAID, service.findOrder("NEW").getStatus(), "未超时的不能被误伤");
+    }
+
+    /**
+     * ★ 这个测试比上一个重要得多。
+     *
+     * 如果 SQL 漏了 status = 'UNPAID'（只按时间筛），上一个测试仍然会绿
+     * （OLD 本来就是未支付，取消它是对的），但这里会红：
+     * 用户已经付过款的订单会被错误地改成「已取消」——钱收了，货不发。
+     *
+     * 这类事故没有任何报错，只有测试能提前拦住。
+     */
+    @Test
+    void cancelExpired_doesNotTouchPaidOrders() throws Exception {
+        service.createOrder("PAID-OLD", money("30"));
+        assertTrue(service.pay("PAID-OLD"), "前置条件：订单应支付成功");
+
+        jdbc.update("UPDATE orders SET created_at = ? WHERE id = ?",
+                Timestamp.valueOf(LocalDateTime.now().minusDays(2)), "PAID-OLD");
+
+        int cancelled = service.cancelExpiredOrders(24);
+
+        assertEquals(0, cancelled, "已支付的订单不该被取消");
+        assertEquals(OrderStatus.PAID, service.findOrder("PAID-OLD").getStatus(), "状态必须保持 PAID");
+    }
+}
