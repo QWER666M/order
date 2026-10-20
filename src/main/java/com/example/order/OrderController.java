@@ -16,7 +16,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
-
+import com.example.order.dto.OrderItemResponse;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
@@ -96,7 +96,29 @@ public class OrderController {
         // 明细只在这一层按需查询：列表接口不会为每条订单都查一次明细（避免 N+1）
         return OrderDetailResponse.from(order, service.findOrderItems(id));
     }
+    @GetMapping("/{id}/items")
+    public List<OrderItemResponse> items(@PathVariable String id,
+                                         @RequestAttribute(name = AuthInterceptor.ATTR_USERNAME, required = false) String user) {
+       if (!service.isOwnedBy(id, user)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在：" + id);
+        }
+        Order order = service.findOrder(id);
+         if (order == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在：" + id);
+        }
+        
+        
+        
+        return service.findOrderItems(id).stream()
+                .map(OrderItemResponse::from)
+                .toList();  
+     
+    }
 
+
+
+
+    
     /** POST /orders/{id}/pay —— 支付；不是自己的订单返回 404，状态冲突返回 409 */
     @PostMapping("/{id}/pay")
     public Map<String, Object> pay(@PathVariable String id,

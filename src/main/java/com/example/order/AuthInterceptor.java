@@ -109,4 +109,8 @@ public class AuthInterceptor implements HandlerInterceptor {
         response.setContentType("application/json;charset=UTF-8");
         objectMapper.writeValue(response.getWriter(), java.util.Map.of("error", message));
     }
+
+
+
+
 }

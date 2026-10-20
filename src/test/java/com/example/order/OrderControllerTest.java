@@ -295,4 +295,33 @@ class OrderControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.items[0].id").value("A001"))
                 .andExpect(jsonPath("$.items[0].items").doesNotExist());
-    }}
+    }
+       @Test
+    void items_found_returns200AndList() throws Exception {
+        service.createOrder("A001", money("20"),
+                List.of(new OrderItem("apple", money("10"), 2)));
+
+        mockMvc.perform(get("/orders/A001/items"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].productName").value("apple"));
+    }
+
+    @Test
+    void items_orderNotFound_returns404() throws Exception {
+        mockMvc.perform(get("/orders/NOT-EXIST/items"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("订单不存在：NOT-EXIST"));
+    }
+    @Test
+    void items_ofOthersOrder_returns404() throws Exception {
+        // 订单的主人是 alice（第 4 个参数）
+        service.createOrder("A001", money("20"),
+                List.of(new OrderItem("apple", money("10"), 2)), "alice");   // ①
+
+        mockMvc.perform(get("/orders/A001/items")
+                        .requestAttr("currentUsername", "bob"))                      // ② 装"我是谁"的属性名
+                .andExpect(status().isNotFound());
+    }
+
+}
