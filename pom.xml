@@ -62,6 +62,17 @@
             <artifactId>spring-security-crypto</artifactId>
         </dependency>
 
+        <!--
+          Actuator：健康检查与运行时观测端点。
+          提供 /actuator/health（能否干活）与 liveness / readiness 探针，
+          供 Docker HEALTHCHECK、K8s 探针、监控系统使用。
+          ★ 默认只暴露 health，env / heapdump 这类敏感端点不会自动打开。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
         <!-- JWT：api 编译期用；impl / jackson 仅运行期需要 -->
         <dependency>
             <groupId>io.jsonwebtoken</groupId>

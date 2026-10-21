@@ -39,12 +39,26 @@ WORKDIR /app
 #   这条几乎是容器安全基线的必查项。
 RUN useradd --system --uid 1001 --create-home appuser
 
+# HEALTHCHECK 需要一个 HTTP 客户端，而这个基础镜像里没有 curl。
+# 装完立刻清掉 apt 列表，否则会在镜像里留下几十 MB 的缓存。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 # --chown 让 appuser 拥有 jar；不加的话文件属主是 root，虽然只读也能跑，
 # 但保持"运行用户拥有自己的文件"是更清晰的做法
 COPY --from=build --chown=appuser:appuser /build/target/*.jar app.jar
 
 USER appuser
 EXPOSE 8080
+
+# ★ 关键：查的是 readiness 而不是端口存活。
+#   -f           HTTP 4xx/5xx 视为失败（503 时 curl 会返回非 0）
+#   --start-period  启动阶段给足时间（应用启动 + 建表），期间的失败不计入 retries
+#   --interval/--retries  连续 3 次失败才判定 unhealthy，避免偶发抖动
+#   于是 docker compose ps 里会显示 (healthy)，而不是永远 (running)。
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8080/actuator/health/readiness || exit 1
 
 # ★ 用 exec 形式（JSON 数组），不要用 shell 形式。
 #   shell 形式会变成 "sh -c java -jar ..."，java 不再是 1 号进程，

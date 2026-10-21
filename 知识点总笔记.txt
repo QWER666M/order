@@ -2130,6 +2130,126 @@ Q10 什么是依赖注入？
 
 
 ============================================================
+十八、健康检查（Actuator）：活着 ≠ 能干活
+============================================================
+
+【18.1 不加 Actuator 时，"就绪"只能靠凑合】
+
+  CI 里原来的判断方式：
+      code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/orders)
+      [ "$code" = "401" ] && echo "应用已就绪"
+  逻辑是"业务接口返回 401（未登录），说明 Tomcat 起来了"。
+
+  问题：
+    - 只能证明 Web 层活着，证明不了数据库通
+    - 接口行为一变（比如改成 403），判断就失效
+    - docker compose ps 里 app 永远 running，永远不会 healthy
+
+【18.2 三个端点，回答三个不同的问题】
+
+  /actuator/health            总体状态（含 db、diskSpace）   挂 -> 503
+  /actuator/health/liveness   进程还活着吗？失败 -> 应该【重启】
+  /actuator/health/readiness  能接流量吗？  失败 -> 应该【摘流量，别重启】
+
+  ★ 为什么必须分开（真实事故形态）：
+      数据库挂 3 秒
+        -> 若探针失败就重启：重启 -> 还是连不上 -> 再失败 -> 再重启
+        -> 数据库恢复前被重启几十次；恢复后服务还在冷启动
+      分开之后：
+        liveness 仍 UP  -> 不重启
+        readiness DOWN  -> 摘流量
+        数据库恢复      -> readiness 自动回 UP -> 流量回来
+
+  ★ 一句话：liveness 只看"进程自己"，绝不因为外部依赖挂掉而重启。
+
+【18.3 ★★ 实测推翻了一个想当然的结论：readiness 默认不含 db】
+
+  我原以为"readiness 会自动检查所有依赖（含 db）"，实测是错的。
+
+  实验：把数据源指向不存在的端口（3399），故意让应用能启动但连不上库
+      SPRING_DATASOURCE_URL=jdbc:mysql://127.0.0.1:3399/nodb?...
+      SPRING_DATASOURCE_HIKARI_INITIALIZATION_FAIL_TIMEOUT=-1   （不快速失败）
+      SPRING_SQL_INIT_MODE=never                                （跳过建表）
+
+  结果（默认配置）：
+      /actuator/health/liveness   -> 200 {"status":"UP"}
+      /actuator/health/readiness  -> 200 {"status":"UP"}    ← 数据库都挂了还是 UP！
+
+  原因：Spring Boot 默认的 readiness 组【只有 readinessState】，
+        它只表示"应用是否愿意接流量"，【不包含 db】。
+        其它 indicator（db、diskSpace…）只在主健康组里。
+
+  修正（必须显式配置）：
+      management.endpoint.health.probes.enabled=true
+      management.endpoint.health.group.readiness.include=readinessState,db
+
+  再测：
+      liveness   -> 200 UP    0.16 秒（根本不碰数据库）
+      readiness  -> 503 DOWN  3 秒（等取连接超时）
+      health     -> 503 DOWN  3 秒
+
+  ★ 教训：默认值的方向不一定符合你的直觉。凡是"依赖健康"的判断，
+    都要亲手把依赖弄挂一次，看它到底怎么反应。
+
+【18.4 连接超时会拖慢探针】
+
+  第一次实测 readiness 用了 30 秒才返回 —— 因为 HikariCP 的 connection-timeout
+  默认 30000ms，健康检查要等"取连接超时"才结束。
+  而 Docker/K8s 探针通常 3~5 秒就超时 -> 探针先超时，拿不到 503，
+  失败原因会被误判成"应用卡死"。
+
+  解决：connection-timeout 调到 3000
+      spring.datasource.hikari.connection-timeout=3000
+  于是 readiness 在 3 秒内返回 DOWN，探针能读到。
+
+【18.5 安全：默认只暴露 health，别手贱打开别的】
+
+  management.endpoints.web.exposure.include=health,info
+
+  ❌ /actuator/env       把所有配置原样打出来，包括 spring.datasource.password
+  ❌ /actuator/heapdump  能下载整个堆内存，里面有明文业务数据
+  ❌ /actuator/shutdown  远程关闭应用
+  ⚠️ /actuator/beans、/actuator/metrics 会暴露内部结构
+
+  ★ 这条要写成【测试】，不能只靠自觉：
+      mockMvc.perform(get("/actuator/env")).andExpect(status().isNotFound());
+
+【18.6 Docker HEALTHCHECK】
+
+  HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+      CMD curl -fsS http://127.0.0.1:8080/actuator/health/readiness || exit 1
+
+  - 查 readiness，不查端口存活：端口通 != 能干活
+  - -f 让 curl 对 4xx/5xx 返回非 0（503 才会被判定失败）
+  - --start-period=40s：启动阶段（建表等）的失败不计入 retries
+  - 基础镜像 eclipse-temurin:21-jre 里没有 curl，需要
+        RUN apt-get update && apt-get install -y --no-install-recommends curl \
+            && rm -rf /var/lib/apt/lists/*
+    （不清列表会在镜像里留几十 MB 缓存）
+
+  效果：docker compose ps 显示 (healthy)，而不是永远 (running)。
+
+【18.7 配置遮蔽的又一次提醒】
+
+  src/test/resources/application.properties 会整份遮蔽主配置，
+  所以 management.* 也要在测试配置里重复一份。
+  否则 "env 未暴露" 这条断言会因为【框架默认值】而通过，
+  测的不是我们的配置 —— 那是假绿。
+
+【18.8 面试话术】
+
+  "健康检查我分了三层：/health 是总状态；liveness 只判断进程自己，
+    失败才重启；readiness 判断能不能接流量，失败只摘流量。
+    这里踩过一个坑：Spring Boot 默认的 readiness 组不包含 db，
+    我把数据源指向不存在的端口实测，发现数据库挂了 readiness 还是 UP，
+    显式配 group.readiness.include=readinessState,db 才对。
+    另外连接超时默认 30 秒，探针 3 秒就超时了，
+    所以把 Hikari connection-timeout 调到 3 秒。
+    暴露面只开 health 和 info，env/heapdump 保持关闭，并且写了测试守着。"
+
+
+
+============================================================
 【学习历程回顾】
 ============================================================
 
@@ -2166,6 +2286,9 @@ Q10 什么是依赖注入？
                                  depends_on 健康检查
   Step 22 定时任务                 @Scheduled + @EnableScheduling；规则留在 Service；
                                  批量 UPDATE 的条件必须精确；用破坏性验证证明边界测试的价值
+  Step 23 健康检查                 Actuator 三端点（health / liveness / readiness）；
+                                 readiness 默认不含 db（实测），需 group.include；
+                                 connection-timeout 影响探针响应速度；Docker HEALTHCHECK
 
 ============================================================
   笔记结束。卡住的时候先翻"常见坑清单"，再去"面试问答"自测。

@@ -29,6 +29,9 @@
   实现上继承 `ResponseEntityExceptionHandler`，因此框架自身抛出的标准异常（JSON 格式错误等）
   也会走同一套格式，不会破坏框架判定的状态码
 - **接口文档**：集成 Swagger UI，可在浏览器中直接调试所有接口
+- **健康检查**：集成 Actuator，提供 `/actuator/health` 与 liveness / readiness 探针；
+  只暴露 `health` 与 `info`（`env` / `heapdump` 保持关闭并有测试守护）。
+  Docker 镜像配置了 `HEALTHCHECK`，`docker compose ps` 可显示 `(healthy)`
 
 ## 技术栈
 
@@ -588,8 +591,7 @@ order-app/
     │   │   ├── OrderItem.java               订单明细实体（1:N）
     │   │   ├── User.java                    用户实体
     │   │   ├── OrderStatus.java             订单状态枚举
-    │   │   ├── OrderCleanupJob.java         定时任务：取消超时未支付订单
-    │   │   ├── UserService.java             注册 / 登录（BCrypt 校验）
+    │   │   ├── OrderCleanupJob.java         定时任务：取消超时未支付订单    │   │   ├── UserService.java             注册 / 登录（BCrypt 校验）
     │   │   ├── UserRepository.java          用户数据访问
     │   │   ├── JwtService.java              JWT 签发与验签
     │   │   ├── AuthController.java          /auth/register、/auth/login
@@ -622,7 +624,9 @@ order-app/
         │   ├── OrderServiceTest.java        业务层测试（含并发测试）
         │   ├── OrderControllerTest.java     接口层测试（MockMvc）
         │   ├── AuthApiTest.java             认证与授权测试（开启鉴权）
-        │   └── AdminApiTest.java            角色与权限模型测试（开启鉴权）
+        │   ├── AdminApiTest.java            角色与权限模型测试（开启鉴权）
+        │   ├── ActuatorHealthTest.java      健康检查契约 + 敏感端点未暴露
+        │   └── DataSourceBindingTest.java   数据源守卫（断言确实连的是 MySQL）
         └── resources/
             └── application.properties       测试专用配置（H2 内存库）
 ```
@@ -672,7 +676,7 @@ CREATE TABLE order_items (
 
 ## 测试
 
-共 **70 个测试**，分三层：
+共 **74 个测试**，分三层：
 
 ### 业务层测试 `OrderServiceTest`（20 个）
 
@@ -772,15 +776,25 @@ CREATE TABLE order_items (
 | `deletedUser_tokenBecomesInvalid` | 用户被删除后，未过期的 token 立刻失效（401） |
 
 ### 数据源守卫 `DataSourceBindingTest`（1 个）
-
 只做一件事：断言"当前测试到底连的是哪个数据库"，由环境变量 `EXPECT_DB` 驱动。
-
 - 本地不设 `EXPECT_DB` → 自动 `assumeTrue` **跳过**（默认跑 H2，不需要装数据库）
 - CI 设置 `EXPECT_DB=mysql` → 连接串里必须出现 `mysql`，否则测试失败
 
 它防的是一种很隐蔽的事故：CI 里环境变量名字拼错（例如写成 `SPRING_DATASOURCE_URI`），
 Spring 会**静默忽略**这个变量，测试于是在 H2 上全绿，流水线却报告"MySQL 通过"——
 从头到尾根本没碰过 MySQL。有了这个守卫，流水线就不可能说谎。
+
+### 健康检查契约 `ActuatorHealthTest`（4 个）
+
+| 测试 | 验证内容 |
+|---|---|
+| `health_isUp` | `/actuator/health` 返回 200 且 `status=UP` |
+| `livenessProbe_isAvailable` | liveness 探针存在且为 UP |
+| `readinessProbe_isAvailable` | readiness 探针存在且为 UP |
+| **`sensitiveEndpoints_areNotExposed`** | **`env` / `heapdump` / `beans` 均返回 404**（安全回归） |
+
+最后一条是安全回归测试：`/actuator/env` 会把数据库密码原样打出来。若有人为排错把它加进
+`exposure.include` 却忘了删，这个测试会立刻变红。
 
 ### 默认 H2 / 可选 MySQL
 
@@ -806,6 +820,94 @@ $env:SPRING_DATASOURCE_PASSWORD = "order123"
 $env:EXPECT_DB = "mysql"      # 打开数据源守卫
 mvn clean verify
 ```
+
+## 健康检查
+
+集成 Spring Boot Actuator，供 Docker `HEALTHCHECK`、K8s 探针与监控系统使用。
+
+| 端点 | 作用 | 正常 | 异常 |
+|---|---|---|---|
+| `/actuator/health` | 总体状态（含数据库） | 200 `{"status":"UP"}` | **503** `{"status":"DOWN"}` |
+| `/actuator/health/liveness` | 进程是否还活着 → 失败该**重启** | 200 | 503 |
+| `/actuator/health/readiness` | 能否接流量 → 失败该**摘流量** | 200 | 503 |
+| `/actuator/info` | 应用信息 | 200 | — |
+
+### 只暴露 health / info
+
+```properties
+management.endpoints.web.exposure.include=health,info
+```
+
+`env` / `heapdump` / `beans` 这类端点**必须保持关闭**：
+
+- `/actuator/env` 会把 `spring.datasource.password` 原样打出来
+- `/actuator/heapdump` 能下载整个堆内存，里面有明文业务数据
+
+`ActuatorHealthTest` 专门断言这三个端点返回 404 —— 防止有人为了排错打开后忘了关。
+
+### ★ readiness 默认不含 db（实测确认的坑）
+
+Spring Boot 默认的 readiness 组**只有 `readinessState`**（应用自身是否愿意接流量），**不包含 `db`**。
+也就是说：数据库挂了，`readiness` 仍然是 `UP`。这与"依赖不可用就摘流量"的预期相反。
+
+实测（把数据源指向不存在的端口）：
+
+| 配置 | readiness 结果 |
+|---|---|
+| 默认 | `{"status":"UP"}` 200 ← **错误的期望** |
+| 加上 `group.readiness.include=readinessState,db` | `{"status":"DOWN"}` 503 ✅ |
+
+所以必须显式配置：
+
+```properties
+management.endpoint.health.probes.enabled=true
+management.endpoint.health.group.readiness.include=readinessState,db
+```
+
+`liveness` **故意不包含 db**：外部依赖挂了重启本进程解决不了问题，只会让服务在恢复前被反复重启（雪崩）。
+
+### 为什么 liveness 和 readiness 必须分开
+
+```
+数据库挂了 3 秒
+   ↓
+若只有一种探针且会触发重启：
+   重启 → 数据库仍不通 → 再失败 → 再重启 …… 数据库恢复前被重启几十次
+   ↓
+分开之后：
+   liveness  仍 UP   → 不重启
+   readiness DOWN    → 摘掉流量，不接新请求
+   数据库恢复 → readiness 自动变回 UP → 流量回来
+```
+
+实测（数据库不可达时）：
+
+| 端点 | 结果 | 用时 |
+|---|---|---|
+| `/actuator/health/liveness` | 200 `UP` | **0.16 秒**（不碰数据库） |
+| `/actuator/health/readiness` | 503 `DOWN` | **3 秒**（等取连接超时） |
+| `/actuator/health` | 503 `DOWN` | 3 秒 |
+
+### 连接超时与探针的关系
+
+`spring.datasource.hikari.connection-timeout` 从 30000 调到 **3000**：
+
+数据库不可用时，健康检查要等"取连接超时"才返回。30 秒会让 3~5 秒超时的探针根本读不到结果 ——
+探针超时会被当成失败，但**原因会被误判成"应用卡死"**。3 秒既让探针及时拿到 `DOWN`，
+又不影响正常请求。
+
+### Docker 层
+
+`Dockerfile` 里配置了 `HEALTHCHECK`，因此 `docker compose ps` 会显示 `(healthy)` 而不只是 `(running)`：
+
+```dockerfile
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8080/actuator/health/readiness || exit 1
+```
+
+- 查 readiness 而不是端口存活 —— 端口通不等于能干活
+- `--start-period=40s`：启动阶段（建表等）的失败不计入 `--retries`
+- `curl -f`：HTTP 4xx/5xx 视为失败（503 时返回非 0 退出码）
 
 ## 持续集成
 
