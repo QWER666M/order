@@ -391,8 +391,26 @@ class OrderServiceTest {
         assertTrue(service.findOrderItems("A001").isEmpty(), "明细也应被回滚");
     }
 
-    // ================= 超时订单自动取消 =================
+    // ================= 归属判断（fail-closed） =================
 
+    /**
+     * ★ isOwnedBy 的唯一正确行为：拿不到身份 = 谁的订单都不是你的。
+     *
+     * 旧实现写成 `if (ownerId == null) return true;`（"未开启鉴权就不做归属校验"），
+     * 后果是：只要应用跑在鉴权关闭的配置下，任何人都能按订单号读任意订单。
+     * 为了方便测试而放宽安全判断，代价就是这个。
+     */
+    @Test
+    void isOwnedBy_nullIdentity_isAlwaysFalse() {
+        service.createOrder("A001", money("100"), List.of(), "alice");
+
+        assertFalse(service.isOwnedBy("A001", null), "没有身份时必须拒绝");
+        assertTrue(service.isOwnedBy("A001", "alice"), "本人的订单应通过");
+        assertFalse(service.isOwnedBy("A001", "bob"), "别人的订单必须拒绝");
+        assertFalse(service.isOwnedBy("NOT-EXIST", "alice"), "不存在也返回 false");
+    }
+
+    // ================= 超时订单自动取消 =================
     /**
      * 只有「未支付 且 已超时」的订单会被取消。
      *

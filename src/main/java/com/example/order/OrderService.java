@@ -191,12 +191,21 @@ public class OrderService {
 
     /**
      * 判断某笔订单是否属于该用户。
-     * ★ 订单不存在、或属于别人，都返回 false —— 接口层统一转成 404，
-     *   这样不会泄露"这个订单号是存在的"（否则攻击者可以枚举订单号）。
+     *
+     * ★ 三种情况一律返回 false（默认拒绝，fail-closed）：
+     *   1. ownerId 为 null      —— 不知道你是谁，就谁的订单都不是你的
+     *   2. 订单不存在           —— 不泄露"这个订单号是否存在"
+     *   3. 订单属于别人         —— 同上
+     *
+     * ★ 这里曾经写成 `if (ownerId == null) return true;`，
+     *   理由是"测试环境关闭鉴权时没有用户，就不做归属校验"。
+     *   那是个错误的设计：为了方便测试而放宽安全判断，
+     *   导致同一个接口在"鉴权关闭"这种配置下行为完全不同
+     *   （任何人都能读任何订单）。安全判断必须往"拒绝"那一侧倒。
      */
     public boolean isOwnedBy(String id, String ownerId) {
         if (ownerId == null) {
-            return true;                        // 未开启鉴权（测试环境）时不做归属校验
+            return false;
         }
         Order order = repository.get(id);
         return order != null && ownerId.equals(order.getOwnerId());

@@ -52,6 +52,17 @@ class OrderControllerTest {
         return new BigDecimal(value);
     }
 
+    /**
+     * 关掉鉴权时，"我是谁"要由测试自己写进 request 属性（拦截器不会跑）。
+     *
+     * ★ 为什么必须这样做：
+     *   OrderService.isOwnedBy 在 ownerId 为 null 时返回 false（默认拒绝）。
+     *   所以"能读到自己的订单"这个测试，必须先明确身份、并让订单属于这个人。
+     *   之前这两个前提都由一个宽松默认值（null -> 放行）兜着，
+     *   测试能过，但测的其实是"没有身份也能读任何订单" —— 一个错误的行为。
+     */
+    private static final String OWNER = "alice";
+
     // ================= 创建订单 POST /orders =================
 
     @Test
@@ -111,9 +122,9 @@ class OrderControllerTest {
 
     @Test
     void getOne_found_returns200() throws Exception {
-        service.createOrder("A001", money("100"));
+        service.createOrder("A001", money("100"), List.of(), OWNER);
 
-        mockMvc.perform(get("/orders/A001"))
+        mockMvc.perform(get("/orders/A001").requestAttr(AuthInterceptor.ATTR_USERNAME, OWNER))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id").value("A001"))
                 .andExpect(jsonPath("$.amount").value(100.00))
@@ -125,6 +136,33 @@ class OrderControllerTest {
         mockMvc.perform(get("/orders/NOT-EXIST"))
                 .andExpect(status().isNotFound())              // 404
                 .andExpect(jsonPath("$.error").value("订单不存在：NOT-EXIST"));   // 统一错误格式
+    }
+
+    // ================= 身份缺失时必须拒绝（fail-closed） =================
+
+    /**
+     * ★ 回归测试：没有身份时，绝不能读到任何订单。
+     *
+     * 这条用例在"isOwnedBy 遇到 null 就放行"的旧实现下会返回 200 —— 也就是说，
+     * 只要鉴权被关掉（或将来某个配置失误），任何人不带身份就能读任意订单。
+     * 现在 isOwnedBy 对 null 返回 false，这里必须是 404。
+     */
+    @Test
+    void getOne_withoutIdentity_returns404() throws Exception {
+        service.createOrder("A001", money("100"), List.of(), OWNER);
+
+        // 故意不设置 currentUsername
+        mockMvc.perform(get("/orders/A001"))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void items_withoutIdentity_returns404() throws Exception {
+        service.createOrder("A001", money("20"),
+                List.of(new OrderItem("apple", money("10"), 2)), OWNER);
+
+        mockMvc.perform(get("/orders/A001/items"))
+                .andExpect(status().isNotFound());
     }
 
     // ================= 分页查询 GET /orders?page=&size= =================
@@ -196,9 +234,9 @@ class OrderControllerTest {
 
     @Test
     void pay_success_returns200() throws Exception {
-        service.createOrder("A001", money("100"));
+        service.createOrder("A001", money("100"), List.of(), OWNER);
 
-        mockMvc.perform(post("/orders/A001/pay"))
+        mockMvc.perform(post("/orders/A001/pay").requestAttr(AuthInterceptor.ATTR_USERNAME, OWNER))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.message").value("支付成功"))
                 .andExpect(jsonPath("$.order.status").value("PAID"));
@@ -206,28 +244,36 @@ class OrderControllerTest {
 
     @Test
     void pay_alreadyPaid_returns409() throws Exception {
-        service.createOrder("A001", money("100"));
+        service.createOrder("A001", money("100"), List.of(), OWNER);
         service.pay("A001");
 
-        mockMvc.perform(post("/orders/A001/pay"))
+        mockMvc.perform(post("/orders/A001/pay").requestAttr(AuthInterceptor.ATTR_USERNAME, OWNER))
                 .andExpect(status().isConflict())              // 409
                 .andExpect(jsonPath("$.error").value("支付失败：订单不存在或不是待支付状态"));
     }
 
+    /**
+     * 支付一笔不存在的订单。
+     *
+     * ★ 行为变化：从前是 409（归属检查被宽松默认值放过，落到"状态冲突"），
+     *   现在是 404 —— 因为订单不属于你（也根本不存在），与"查详情"的语义一致。
+     *   好处是：不管订单是"不存在"还是"是别人的"，对外都是同一个 404，
+     *   攻击者无法用状态码差异判断订单号是否存在。
+     */
     @Test
-    void pay_orderNotFound_returns409() throws Exception {
-        mockMvc.perform(post("/orders/NOT-EXIST/pay"))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.error").exists());
+    void pay_orderNotFound_returns404() throws Exception {
+        mockMvc.perform(post("/orders/NOT-EXIST/pay").requestAttr(AuthInterceptor.ATTR_USERNAME, OWNER))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("订单不存在：NOT-EXIST"));
     }
 
     // ================= 取消 POST /orders/{id}/cancel =================
 
     @Test
     void cancel_success_returns200() throws Exception {
-        service.createOrder("A001", money("100"));
+        service.createOrder("A001", money("100"), List.of(), OWNER);
 
-        mockMvc.perform(post("/orders/A001/cancel"))
+        mockMvc.perform(post("/orders/A001/cancel").requestAttr(AuthInterceptor.ATTR_USERNAME, OWNER))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.message").value("取消成功"))
                 .andExpect(jsonPath("$.order.status").value("CANCELLED"));
@@ -273,9 +319,9 @@ class OrderControllerTest {
     void getOne_returnsItems() throws Exception {
         service.createOrder("A001", null, List.of(
                 new OrderItem("苹果", new BigDecimal("10.00"), 2),
-                new OrderItem("香蕉", new BigDecimal("3.50"), 1)));
+                new OrderItem("香蕉", new BigDecimal("3.50"), 1)), OWNER);
 
-        mockMvc.perform(get("/orders/A001"))
+        mockMvc.perform(get("/orders/A001").requestAttr(AuthInterceptor.ATTR_USERNAME, OWNER))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.amount").value(23.50))
                 .andExpect(jsonPath("$.items.length()").value(2))
@@ -299,9 +345,9 @@ class OrderControllerTest {
        @Test
     void items_found_returns200AndList() throws Exception {
         service.createOrder("A001", money("20"),
-                List.of(new OrderItem("apple", money("10"), 2)));
+                List.of(new OrderItem("apple", money("10"), 2)), OWNER);
 
-        mockMvc.perform(get("/orders/A001/items"))
+        mockMvc.perform(get("/orders/A001/items").requestAttr(AuthInterceptor.ATTR_USERNAME, OWNER))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.length()").value(1))
                 .andExpect(jsonPath("$[0].productName").value("apple"));

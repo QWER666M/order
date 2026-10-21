@@ -491,6 +491,7 @@ curl "http://localhost:8080/orders?page=1&size=10"
 | 未登录 / token 无效 | 401 | `{"error": "登录已失效，请重新登录"}` |
 | 登录密码错误 | 401 | `{"error": "用户名或密码错误"}` |
 | 访问他人订单 | 404 | `{"error": "订单不存在：A001"}` |
+| 没有身份（鉴权关闭且未写入当前用户） | 404 | `{"error": "订单不存在：A001"}`（默认拒绝，不泄露存在性） |
 | 请求体 JSON 格式错误 | 400 | `{"error": "Bad Request"}` |
 | 请求方法不支持 | 405 | `{"error": "Method Not Allowed"}` |
 | 请求 Content-Type 不支持 | 415 | `{"error": "Unsupported Media Type"}` |
@@ -676,9 +677,9 @@ CREATE TABLE order_items (
 
 ## 测试
 
-共 **74 个测试**，分三层：
+共 **77 个测试**，分三层：
 
-### 业务层测试 `OrderServiceTest`（20 个）
+### 业务层测试 `OrderServiceTest`（21 个）
 
 直接调用 `OrderService` 的 Java 方法，验证业务规则与并发安全：
 
@@ -702,10 +703,11 @@ CREATE TABLE order_items (
 | `pay_concurrentOnlyOneSucceeds` | 20 线程并发支付同一订单，**仅 1 个成功** |
 | `cancel_concurrentOnlyOneSucceeds` | 20 线程并发取消同一订单，**仅 1 个成功** |
 | `createOrder_concurrentSameId_onlyOneSucceeds` | 20 线程并发创建同一订单号，**仅 1 个成功，其余为友好业务错误（不产生 500）** |
+| **`isOwnedBy_nullIdentity_isAlwaysFalse`** | **没有身份时一律拒绝**（null / 别人的 / 不存在的都返回 false） |
 | `cancelExpired_cancelsExpiredUnpaidOnly` | 超时未支付订单被取消；**未超时的不受牵连** |
 | **`cancelExpired_doesNotTouchPaidOrders`** | **已支付的订单即使超时也绝不取消**（删掉 SQL 里的 `status='UNPAID'` 会立刻变红） |
 
-### 接口层测试 `OrderControllerTest`（24 个）
+### 接口层测试 `OrderControllerTest`（26 个）
 
 使用 `MockMvc` 模拟 HTTP 请求，验证**状态码、JSON 字段名、错误格式与 DTO 白名单**：
 
@@ -729,6 +731,8 @@ CREATE TABLE order_items (
 | `items_found_returns200AndList` | `GET /orders/{id}/items` 返回明细数组（非对象），长度与字段正确 |
 | `items_orderNotFound_returns404` | 订单不存在返回 404 与统一错误格式 |
 | `items_ofOthersOrder_returns404` | **越权查明细同样返回 404**（不泄露订单是否存在） |
+| **`getOne_withoutIdentity_returns404`** | **没有身份时读不到任何订单**（回归：旧的宽松默认值会返回 200） |
+| `items_withoutIdentity_returns404` | 同上，明细接口同样拒绝 |
 
 ### 认证与授权测试 `AuthApiTest`（11 个）
 
@@ -747,10 +751,6 @@ CREATE TABLE order_items (
 | **`userCannotSeeOrTouchAnotherUsersOrder`** | **越权隔离**：B 看不到、查不到、也支付/取消不了 A 的订单 |
 | `stats_onlyCountsCurrentUsersOrders` | 统计接口只统计自己的订单 |
 | `authEndpoints_arePublic` | `/auth/**` 无需 token（否则无法登录） |
-| `pay_success_returns200` | 支付成功返回 200 |
-| `pay_alreadyPaid_returns409` / `pay_orderNotFound_returns409` | 状态冲突返回 409 |
-| `cancel_success_returns200` | 取消成功返回 200 |
-| `stats_returnsTotalsByStatus` | 统计接口返回各状态金额 |
 
 两层测试的分工：**业务层测"逻辑对不对"，接口层测"HTTP 契约对不对"**。
 
@@ -946,6 +946,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   新增管理接口无需改动拦截器
 - **授权按业务性质分级**：管理员能读任意订单、能取消（运营止损），
   但**不能代付** —— 资金操作必须由订单所属人发起。权限是"能对谁做"，不是"能跳过业务规则"
+- **安全判断一律 fail-closed**：`isOwnedBy` 在拿不到身份（`ownerId == null`）时返回 `false`，
+  而不是"跳过校验"。曾经的写法是 `return true`（为了方便关闭鉴权的测试），
+  结果是**只要应用跑在鉴权关闭的配置下，任何人不带身份就能读任意订单**。
+  改完之后有 7 个测试立刻变红（它们此前靠这个宽松默认值才通过），并补了 3 条专门的回归测试
 - **后台任务与入口可替换**：`OrderCleanupJob` 用 `@Scheduled` 触发，方法体只有一行
   `orderService.cancelExpiredOrders(...)`。规则在 Service，所以定时触发、以后的管理端手动触发
   共用同一份逻辑；测试直接调 Service，无需启动定时器

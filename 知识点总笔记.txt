@@ -2250,6 +2250,103 @@ Q10 什么是依赖注入？
 
 
 ============================================================
+十九、安全判断要 fail-closed：一个 return true 的代价
+============================================================
+
+【19.1 缺陷长什么样】
+
+      public boolean isOwnedBy(String id, String ownerId) {
+          if (ownerId == null) {
+              return true;              // ← "未开启鉴权就不做归属校验"
+          }
+          Order order = repository.get(id);
+          return order != null && ownerId.equals(order.getOwnerId());
+      }
+
+  这句 return true 是当初为了"测试里鉴权关闭、没有 user"而加的。
+  听起来只是个测试便利，实际后果是：
+
+      只要应用跑在【鉴权关闭】的配置下（app.auth.enabled=false），
+      任何人不带身份就能按订单号读任意订单 —— 200，不是 404。
+
+  而"鉴权关闭"是个配置项。配置失误、profile 抄错、环境变量漏设，
+  都会让这个口子在生产上打开，且【没有任何报错】。
+
+【19.2 原则：fail-closed，不是 fail-open】
+
+  fail-open （错的方向）：不知道你是谁 -> 放行
+  fail-closed（对的方向）：不知道你是谁 -> 拒绝
+
+  安全判断永远要往"拒绝"那一侧倒：
+    - 拿不到身份        -> 拒绝
+    - 解析出错          -> 拒绝
+    - 数据脏了/枚举值未知 -> 降到最小权限（Role.from 的兜底也是这个思路）
+  宁可少给权限，绝不能意外提权。
+
+【19.3 ★ 改这一行，炸出 7 个测试】
+
+  把 return true 改成 return false 之后立刻跑测试：
+
+      OrderControllerTest.cancel_success_returns200      expected 200 but was 404
+      OrderControllerTest.getOne_found_returns200        expected 200 but was 404
+      OrderControllerTest.getOne_returnsItems            expected 200 but was 404
+      OrderControllerTest.items_found_returns200AndList  expected 200 but was 404
+      OrderControllerTest.pay_alreadyPaid_returns409     expected 409 but was 404
+      OrderControllerTest.pay_orderNotFound_returns409   expected 409 but was 404
+      OrderControllerTest.pay_success_returns200         expected 200 but was 404
+
+  ★ 这 7 个测试此前【一直是绿的】，但它们验证的其实是
+    "没有身份也能读任何订单" —— 一个错误的行为。
+    它们不是被改坏了，是【一直被宽松默认值养着】，直到默认值变严才暴露。
+
+  ★ 这就是"测试全绿"最容易骗人的地方：
+    测试通过只说明"代码符合测试写的期望"，
+    如果期望本身就写错了（在这里是"没身份也能读"），
+    绿色反而是错的行为的证明。
+
+【19.4 怎么修这些测试（而不是改回去）】
+
+  两个前提必须显式写出来：
+    1) 订单要有主人        service.createOrder("A001", money("100"), List.of(), "alice")
+    2) 请求要带上"我是谁"  .requestAttr(AuthInterceptor.ATTR_USERNAME, "alice")
+
+  ★ 属性名用常量 AuthInterceptor.ATTR_USERNAME，不要手打字符串 —— 少一类拼写 bug。
+
+【19.5 顺带修正了一个语义：pay 不存在的订单 由 409 变 404】
+
+  旧行为：归属检查被放过 -> 落到"状态冲突" -> 409
+  新行为：订单不属于你（也不存在）-> 404
+
+  为什么 404 更对：
+    不管订单是"真不存在"还是"是别人的"，对外都是同一个 404，
+    攻击者无法用状态码差异枚举订单号。
+
+【19.6 ★★ 又做了一次破坏性验证】
+
+  改好之后，把 isOwnedBy 临时改回 return true，再跑：
+
+      OrderControllerTest.getOne_withoutIdentity_returns404   expected 404 but was 200
+      OrderControllerTest.items_withoutIdentity_returns404   expected 404 but was 200
+      OrderServiceTest.isOwnedBy_nullIdentity_isAlwaysFalse   expected false but was true
+
+  三条新测试全部变红 -> 证明它们真的盯着这个漏洞，不是摆设。
+  然后再改回来，77 个全绿。
+
+  ★ 判断一个测试有没有价值，就看"把它要防的 bug 塞回去，它会不会红"。
+
+【19.7 面试话术】
+
+  "我修过一个自己埋的坑：isOwnedBy 里对 ownerId 为 null 直接放行，
+   本意是方便鉴权关闭的测试，实际等于只要配置里把鉴权关掉，
+   任何人都能按订单号读任意订单。
+   改成 fail-closed（拿不到身份就拒绝）之后，7 个测试立刻变红 ——
+   它们之前能过，正是因为它们默认了那个错误行为。
+   我又补了 3 条回归测试，并且把旧实现改回去验证过：这三条会红。
+   这类问题的教训是：安全判断宁可拒绝，也不要为了测试方便放宽。"
+
+
+
+============================================================
 【学习历程回顾】
 ============================================================
 
@@ -2289,6 +2386,9 @@ Q10 什么是依赖注入？
   Step 23 健康检查                 Actuator 三端点（health / liveness / readiness）；
                                  readiness 默认不含 db（实测），需 group.include；
                                  connection-timeout 影响探针响应速度；Docker HEALTHCHECK
+  Step 24 修复 fail-open 缺陷      isOwnedBy 拿不到身份时由"放行"改为"拒绝"；
+                                 改一行炸出 7 个测试（它们一直靠宽松默认值才绿）；
+                                 pay 不存在的订单由 409 改为 404，与防枚举语义统一
 
 ============================================================
   笔记结束。卡住的时候先翻"常见坑清单"，再去"面试问答"自测。
