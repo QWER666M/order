@@ -1,0 +1,37 @@
+name: Deploy
+
+# 只在 CI 全绿之后才触发部署 —— 这是"部署门禁"的最简形式：
+#   推代码 -> CI 跑 77 个测试（H2 + MySQL 双流水线）-> 全过 -> 通知 Render 部署
+# 不用 Render 的自动部署，是为了避免"测试挂了但线上已经更新"这种状态。
+#
+# 前置条件：
+#   1. Render 控制台 -> 服务 -> Settings -> Deploy Hook，复制 URL
+#   2. 本仓库 Settings -> Secrets and variables -> Actions -> New secret
+#      Name: RENDER_DEPLOY_HOOK_URL
+#   3. render.yaml 里把 autoDeploy 改成 false（否则 Render 自己也会在 push 时部署一次）
+#
+# 没配置 secret 时本工作流会直接跳过，不会报红 —— 让别人 fork 后不至于看到失败。
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 触发 Render 部署
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "未配置 RENDER_DEPLOY_HOOK_URL，跳过部署。"
+            echo "（Render -> Settings -> Deploy Hook 可获取该地址）"
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK"
+          echo "已通知 Render 部署：${{ github.event.workflow_run.head_sha }}"

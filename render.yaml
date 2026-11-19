@@ -1,0 +1,44 @@
+# Render Blueprint —— 让 Render 直接按 Dockerfile 构建并部署
+#
+# 用法：Render 控制台 → New → Blueprint → 选中本仓库 → Apply
+# 声明式的好处：部署参数（健康检查、计划、区域、环境变量名）都在版本库里，
+# 换人、换账号重建环境时不用靠回忆去点控制台。
+#
+# 注意：Render 的免费数据库是 PostgreSQL，本项目用 MySQL，
+#       所以数据库走外部（TiDB Cloud Starter / Railway 等），见 README「部署到云端」。
+
+services:
+  - type: web
+    name: order-app
+    runtime: docker
+    plan: free
+    region: singapore          # 离国内最近；可选 oregon / ohio / virginia / frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # 健康检查用 readiness（组里包含 db）：数据库连不上就不算部署成功，
+    # 避免"服务起来了但所有请求 500"却显示部署成功。
+    healthCheckPath: /actuator/health/readiness
+    autoDeploy: true
+
+    envVars:
+      # ---- 数据库连接：在 Render 控制台填（sync: false = 不落盘、不显示在仓库里）----
+      - key: SPRING_DATASOURCE_URL
+        sync: false
+      - key: SPRING_DATASOURCE_USERNAME
+        sync: false
+      - key: SPRING_DATASOURCE_PASSWORD
+        sync: false
+
+      # ---- 以下是确定值，不需要人工填 ----
+      - key: SPRING_DATASOURCE_DRIVER_CLASS_NAME
+        value: com.mysql.cj.jdbc.Driver
+
+      # Render 自动生成一个随机值作为 JWT 密钥，避免"忘了改默认密钥就上线"。
+      # 长度 64 字符（base64），满足 HS256 至少 32 字节的要求。
+      - key: APP_JWT_SECRET
+        generateValue: true
+
+      # 免费实例只有 512MB 内存，按容器上限的 75% 计算堆；
+      # 用环境变量而不是改 ENTRYPOINT，镜像保持通用（本地 docker compose 也用它）。
+      - key: JAVA_TOOL_OPTIONS
+        value: -XX:MaxRAMPercentage=75

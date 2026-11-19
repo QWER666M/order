@@ -58,7 +58,7 @@ EXPOSE 8080
 #   --interval/--retries  连续 3 次失败才判定 unhealthy，避免偶发抖动
 #   于是 docker compose ps 里会显示 (healthy)，而不是永远 (running)。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8080/actuator/health/readiness || exit 1
+    CMD curl -fsS "http://127.0.0.1:${PORT:-8080}/actuator/health/readiness" || exit 1
 
 # ★ 用 exec 形式（JSON 数组），不要用 shell 形式。
 #   shell 形式会变成 "sh -c java -jar ..."，java 不再是 1 号进程，

@@ -5,6 +5,9 @@
 一个基于 Spring Boot 的订单管理后端服务，提供订单的创建、查询、支付、取消与统计能力，
 使用分层架构设计，并通过单元测试保证业务规则的正确性。
 
+> **在线演示**：部署完成后把地址填在这里 —— `https://<服务名>.onrender.com/swagger-ui.html`
+> （部署步骤见下文「部署到云端」，`render.yaml` 已就绪）
+
 ## 功能特性
 
 - **创建订单**：自动校验订单号非空、不重复，金额必须大于 0
@@ -88,6 +91,28 @@
 **对外契约与内部模型分离**：接口层不直接暴露 `Order` 实体，而是使用 `dto` 包中的
 `CreateOrderRequest`（入参）与 `OrderResponse`（出参）。这样实体的内部结构可以自由演化，
 而不会破坏对外的 API 契约，同时也明确了「哪些字段对外可见」。
+
+### 代码组织（包结构）
+
+分层不只体现在类名上，包结构同样按层划分 —— 依赖方向可以从 `import` 一眼看出来：
+
+```
+com.example.order
+├── OrderAppApplication.java     启动类
+├── controller/                  接口层：只做 HTTP 解析与响应
+├── service/                     业务层：规则校验与状态流转
+├── repository/                  数据层：唯一写 SQL 的地方
+├── domain/                      实体与枚举（Order / OrderItem / User / Role / OrderStatus）
+├── dto/                         对外契约：入参请求 / 出参响应
+├── security/                    JWT、认证拦截器、授权拦截器、@RequireRole
+├── config/                      拦截器注册、密码编码器
+├── web/                         全局异常处理
+├── exception/                   业务异常（登录失败 → 401）
+└── job/                         定时任务（只决定「何时跑」）
+```
+
+检验分层是否真的落地，看两条：`controller` 包不 import `repository`；
+`repository` 包不 import `service`。反方向（下层依赖上层）一旦出现，说明分层已经被绕过。
 
 ## 快速开始
 
@@ -579,43 +604,51 @@ order-app/
 ├── docker-compose.yml                       MySQL + 应用 一键启动
 ├── Dockerfile                               多阶段构建（Maven 构建 → 仅 JRE 运行）
 ├── .dockerignore                            构建上下文排除项（target/、data/、.git/…）
+├── render.yaml                              Render 部署蓝图（健康检查、环境变量名等）
 ├── db/init-mysql.sql                        重建 MySQL 库与账号（root 执行）
 ├── .github/workflows/ci.yml                 CI：H2 快速验证 + MySQL 真库验证
 └── src/
     ├── main/
     │   ├── java/com/example/order/
     │   │   ├── OrderAppApplication.java     Spring Boot 启动类
-    │   │   ├── OrderController.java         REST 接口层
-    │   │   ├── OrderService.java            业务层（业务规则）
-    │   │   ├── OrderRepository.java         数据层（数据库访问）
-    │   │   ├── Order.java                   订单实体（内部模型）
-    │   │   ├── OrderItem.java               订单明细实体（1:N）
-    │   │   ├── User.java                    用户实体
-    │   │   ├── OrderStatus.java             订单状态枚举
-    │   │   ├── OrderCleanupJob.java         定时任务：取消超时未支付订单    │   │   ├── UserService.java             注册 / 登录（BCrypt 校验）
-    │   │   ├── UserRepository.java          用户数据访问
-    │   │   ├── JwtService.java              JWT 签发与验签
-    │   │   ├── AuthController.java          /auth/register、/auth/login
-    │   │   ├── AdminController.java         管理端接口（仅 ADMIN）
-    │   │   ├── AuthInterceptor.java         校验 Bearer token
-    │   │   ├── Role.java                    角色枚举 USER / ADMIN
-    │   │   ├── RequireRole.java             声明接口所需角色的注解
-    │   │   ├── RoleInterceptor.java         按 @RequireRole 做授权（403）
-    │   │   ├── WebConfig.java               注册拦截器与放行路径
-    │   │   ├── PasswordEncoderConfig.java   BCrypt Bean
-    │   │   ├── LoginFailedException.java    登录失败（映射为 401）
-    │   │   ├── ApiExceptionHandler.java     全局异常处理
-    │   │   └── dto/
-    │   │       ├── RegisterRequest.java      注册入参
-    │   │       ├── LoginRequest.java         登录入参
-    │   │       ├── AuthResponse.java         登录/注册出参（token）
-    │   │       ├── CreateOrderRequest.java   创建订单入参（可含 items）
-    │   │       ├── CreateOrderItemRequest.java  单条明细入参
-    │   │       ├── OrderResponse.java        列表用出参（不含明细）
-    │   │       ├── OrderDetailResponse.java  详情用出参（含明细）
-    │   │       ├── OrderItemResponse.java    明细出参（含小计）
-    │   │       ├── AdminUserResponse.java    管理端用户列表项（不含密码）
-    │   │       └── PageResponse.java         通用分页结构
+    │   │   ├── controller/                  接口层
+    │   │   │   ├── OrderController.java     用户侧订单接口（归属校验）
+    │   │   │   ├── AdminController.java     管理端接口（仅 ADMIN）
+    │   │   │   └── AuthController.java      /auth/register、/auth/login
+    │   │   ├── service/                     业务层
+    │   │   │   ├── OrderService.java        订单规则、状态流转、统计
+    │   │   │   └── UserService.java         注册 / 登录（BCrypt 校验）
+    │   │   ├── repository/                  数据层（唯一写 SQL 的地方）
+    │   │   │   ├── OrderRepository.java     订单与明细的 SQL
+    │   │   │   └── UserRepository.java      用户数据访问
+    │   │   ├── domain/                      实体与枚举
+    │   │   │   ├── Order.java               订单实体（内部模型）
+    │   │   │   ├── OrderItem.java           订单明细实体（1:N）
+    │   │   │   ├── OrderStatus.java         订单状态枚举
+    │   │   │   ├── User.java                用户实体
+    │   │   │   └── Role.java                角色枚举 USER / ADMIN
+    │   │   ├── dto/                         对外契约（入参 / 出参）
+    │   │   │   ├── RegisterRequest.java      注册入参
+    │   │   │   ├── LoginRequest.java         登录入参
+    │   │   │   ├── AuthResponse.java         登录/注册出参（token）
+    │   │   │   ├── CreateOrderRequest.java   创建订单入参（可含 items）
+    │   │   │   ├── CreateOrderItemRequest.java  单条明细入参
+    │   │   │   ├── OrderResponse.java        列表用出参（不含明细）
+    │   │   │   ├── OrderDetailResponse.java  详情用出参（含明细）
+    │   │   │   ├── OrderItemResponse.java    明细出参（含小计）
+    │   │   │   ├── AdminUserResponse.java    管理端用户列表项（不含密码）
+    │   │   │   └── PageResponse.java         通用分页结构
+    │   │   ├── security/                    认证与授权
+    │   │   │   ├── JwtService.java           JWT 签发与验签
+    │   │   │   ├── AuthInterceptor.java      校验 token（401）
+    │   │   │   ├── RoleInterceptor.java      按 @RequireRole 做授权（403）
+    │   │   │   └── RequireRole.java          声明接口所需角色的注解
+    │   │   ├── config/
+    │   │   │   ├── WebConfig.java            注册拦截器与放行路径
+    │   │   │   └── PasswordEncoderConfig.java BCrypt Bean
+    │   │   ├── web/ApiExceptionHandler.java  全局异常处理
+    │   │   ├── exception/LoginFailedException.java  登录失败（映射为 401）
+    │   │   └── job/OrderCleanupJob.java      定时任务：取消超时未支付订单
     │   └── resources/
     │       ├── application.properties       公共配置 + 默认数据源（MySQL）
     │       ├── application-h2.properties    h2 profile：免 Docker 的备用数据源
@@ -693,7 +726,7 @@ CREATE TABLE order_items (
 | `createOrder_idEmpty_throws` | 订单号为空时抛出异常 |
 | `pay_unpaidOrder_success` | 支付待支付订单成功，状态变更为已支付 |
 | `pay_orderNotFound_returnsFalse` | 支付不存在的订单返回 false |
-| `sumAmount_sumsByStatus` | 按状态汇总金额，小数加法精确（10.10 + 0.70 = 10.80） |
+| `stats_sumsByStatus` | 按状态聚合金额（SQL `GROUP BY`），十进制加法精确（10.10 + 0.70 = 10.80），缺省状态返回 0 |
 | `listOrders_pagination` | 分页正确：页码偏移、总数、总页数、超范围返回空页 |
 | `listOrders_invalidPagingParams_throws` | 页码 < 1 或每页条数越界时抛出异常 |
 | `createOrder_withItems_computesTotalOnServer` | 带明细创建，总价由服务端按「单价×数量」计算 |
@@ -926,6 +959,91 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
 两个任务都执行完整的 `clean verify`（编译 → 全部测试 → 打包），任一个失败即表示不能合并。
 构建状态见页面顶部的 CI 徽章；失败时可在 Actions 页面下载 `surefire-reports` 构件查看具体用例。
 
+## 部署到云端（Render + 免费云 MySQL）
+
+代码托管在 GitHub，但 GitHub 自身**不能运行** Spring Boot（GitHub Pages 只托管静态文件）。
+所以路线是：**代码在 GitHub → Render 用 GitHub 账号登录并拉取仓库 → 按 Dockerfile 构建部署**，
+整个过程不需要本地装 Docker，也不需要信用卡。
+
+仓库内的 [`render.yaml`](render.yaml) 是 Render 的 Blueprint（部署蓝图），
+把构建方式、计划、区域、健康检查路径、环境变量名都写进了版本库 ——
+重建环境时不用靠回忆去点控制台。
+
+### 数据库为什么不用 Render 自带的
+
+Render 的免费数据库是 **PostgreSQL**，而本项目用 MySQL（`AUTO_INCREMENT`、`DECIMAL` 等写法）。
+所以数据库放在外部，选一个**真正免费且 MySQL 协议兼容**的：
+
+| 方案 | 免费额度 | 说明 |
+|---|---|---|
+| **TiDB Cloud Starter**（推荐） | 5 GiB 存储 + 5000 万 RU/月，免信用卡 | MySQL 协议兼容，控制台直接给连接串 |
+| Railway MySQL | 试用额度，之后按量计费 | 与本地 docker-compose 行为最接近 |
+
+> ⚠️ **Aiven 的免费档不含 MySQL**（只有 PostgreSQL / Kafka / OpenSearch / Valkey），别照着旧教程去开。
+
+### 步骤
+
+**1. 建数据库（TiDB Cloud Starter）**
+
+注册后创建 Starter 集群 → Connect → 拿到 `Host` / `Port` / `User` / `Password`。
+TiDB **强制 TLS**，连接串里必须带 `sslMode=REQUIRED`。
+
+**2. 在 Render 建服务**
+
+Render → **New → Blueprint** → 选择本仓库 → Apply。
+它会读 `render.yaml` 自动建好 web 服务，并提示你填 3 个待填变量：
+
+| 变量 | 值 |
+|---|---|
+| `SPRING_DATASOURCE_URL` | `jdbc:mysql://<HOST>:4000/<DB_NAME>?sslMode=REQUIRED&useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai` |
+| `SPRING_DATASOURCE_USERNAME` | TiDB 给的用户名 |
+| `SPRING_DATASOURCE_PASSWORD` | TiDB 给的密码 |
+
+其余变量（驱动类名、`APP_JWT_SECRET`、JVM 堆参数）由 `render.yaml` 提供，
+其中 `APP_JWT_SECRET` 用 `generateValue: true` 让 Render 随机生成，避免"忘了改默认密钥就上线"。
+
+**3. 拿到公网地址**
+
+服务页 → **Settings → Networking → Generate Domain**，得到 `https://order-app-xxxx.onrender.com`。
+访问 `/swagger-ui.html` 即可在线调试接口，`/actuator/health` 应返回 `UP`。
+
+### CI 通过后才部署（可选但推荐）
+
+[`.github/workflows/deploy-render.yml`](.github/workflows/deploy-render.yml) 用 `workflow_run` 监听 CI：
+
+```
+push → CI（H2 + MySQL 双流水线，77 个测试）→ 全绿 → 调 Render Deploy Hook → 部署
+```
+
+启用方式：Render → Settings → **Deploy Hook** 复制 URL → 仓库 Settings → Secrets → Actions
+新增 `RENDER_DEPLOY_HOOK_URL`，同时把 `render.yaml` 里的 `autoDeploy` 改成 `false`
+（否则 Render 自己也会在 push 时部署一次）。没配 secret 时该工作流会跳过而不是报红。
+
+### 为什么不用改一行代码
+
+| 关注点 | 机制 |
+|---|---|
+| 端口 | `server.port=${PORT:8080}`，Render 注入 `PORT` 即生效 |
+| 数据源 | Spring Boot 宽松绑定：`SPRING_DATASOURCE_*` 覆盖 `application.properties` |
+| 建表 | `spring.sql.init.mode=always` + `schema.sql` 全是 `IF NOT EXISTS`，首次启动自动建表 |
+| JWT 密钥 | `APP_JWT_SECRET` 覆盖默认占位值（默认值只够本地开发，**绝不能用于线上**） |
+| 健康检查 | 平台探针与容器 HEALTHCHECK 都查 `/actuator/health/readiness`（含 `db`），端口跟随 `PORT` |
+
+### 免费实例的已知限制
+
+- **闲置约 15 分钟会休眠**，下次访问需冷启动（几十秒）。这是免费档的正常行为，不是 bug；
+  面试演示前先访问一次把实例叫醒
+- **没有持久磁盘**：本项目数据都在 MySQL 里，不受影响（也正因如此不要把 H2 文件库用在线上）
+- **512MB 内存**：所以用 `-XX:MaxRAMPercentage=75` 限制堆，避免 OOM 被杀
+- **健康检查失败 = 部署失败**：第一次部署若卡在 health check，九成是数据源变量填错
+  （readiness 组包含 `db`，数据库连不上就不会被判为就绪）；看 Render 的 Logs 里
+  `Communications link failure` / `Access denied` 即可定位
+
+> **一个 TiDB 特有的语义差异**：TiDB 的 `AUTO_INCREMENT` 是分批缓存的，不保证全局严格递增；
+> 本项目用 `ORDER BY seq` 维持插入顺序，在单节点 Starter 实例上没有问题（测试也全部通过），
+> 换成多节点集群后分页顺序可能不完全稳定。这一点在本地 MySQL 上不存在 ——
+> 属于"换数据库要重新审视假设"的典型案例。
+
 ## 技术实现要点
 
 - **依赖注入**：`OrderService` 与 `OrderRepository` 的依赖均由 Spring 容器注入，而非自行创建，
@@ -1003,7 +1121,11 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
 - **金额使用 `BigDecimal`**：货币不能用 `int`（存不了小数）或 `double`（二进制浮点无法精确表示十进制小数，
   `0.1 + 0.2` 会得到 `0.30000000000000004`）。数据库列使用 `DECIMAL(12,2)`，Java 侧全程 `BigDecimal`，
   并在创建时统一归一为两位小数（`setScale(2)`），保证存储与接口返回的金额格式一致。
-  注意 `BigDecimal` 不可变，`add` 会返回新对象，必须接收返回值
+  `BigDecimal` 不可变，`add` 返回新对象 —— 这也是金额统计交给 SQL `SUM()` 而不是在 Java 里手写累加的原因之一
+- **聚合下推到数据库**：`/orders/stats` 与 `/admin/stats` 的统计用一条
+  `SELECT status, SUM(amount) ... GROUP BY status` 完成，最多返回 3 行；
+  而不是把整表订单查进 JVM 再循环累加（那在数据量上来后是 O(n) 的内存与 GC 开销）。
+  三个状态共用同一次查询，避免「一个接口查三次库」；没有订单的状态补 0，保证响应字段恒定存在
 - **SQL 注入防护**：全部 SQL 使用 `?` 占位符传参，不进行字符串拼接
 - **异常语义化**：参数非法抛 `IllegalArgumentException`（由全局处理器转为 HTTP 400），
   业务结果失败返回 `false`（由接口层转为对应的状态码），二者语义区分明确
