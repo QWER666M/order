@@ -1,12 +1,15 @@
-package com.example.order;
+package com.example.order.service;
 
+import com.example.order.domain.Order;
+import com.example.order.domain.OrderItem;
+import com.example.order.domain.OrderStatus;
+import com.example.order.dto.PageResponse;
+import com.example.order.repository.OrderRepository;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
-
-import com.example.order.dto.PageResponse;
-
+import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -238,51 +241,44 @@ public class OrderService {
         return success;
     }
     /**
- * 取消超时未支付的订单。
- *
- * ★ 为什么业务规则写在这里，而不是写在定时任务里？
- *   定时任务只是"入口"（什么时候触发），规则必须放在 Service，
- *   这样以后 Http 手动触发、CLI 批量跑都能复用同一份规则。
- */
-private  int cancelExpiredOrders() {
-    return cancelExpiredOrders(24);   // 默认 24 小时
-}
-public int cancelExpiredOrders(int expireHours) {
-    if (expireHours <= 0) {
-        throw new IllegalArgumentException("超时小时数必须大于 0");
-    }
-
-    // ① 算出时间界限：现在减去 expireHours 小时
-    LocalDateTime deadline = LocalDateTime.now().minus(expireHours, ChronoUnit.HOURS);
-
-    // ② 调数据层
-    int cancelled = repository.cancelExpired(deadline);
-
-    // ③ 写日志（有取消才记 info，没有就 debug，避免日志噪音）
-    if (cancelled > 0) {
-        log.info("自动取消超时未支付订单: {} 笔, 界限={}", cancelled, deadline);
-    } else {
-        log.debug("没有超时的未支付订单");
-    }
-    return cancelled;
-}
-
-    /** 统计某个状态下的订单总金额。 */
-    public BigDecimal sumAmount(OrderStatus status) {
-        return sumAmount(status, null);
-    }
-
-    /** 只统计该用户的订单金额 */
-    public BigDecimal sumAmount(OrderStatus status, String ownerId) {
-        BigDecimal sum = BigDecimal.ZERO;
-        List<Order> orders = (ownerId == null) ? repository.listAll() : repository.listAll(ownerId);
-        for (Order order : orders) {
-            if (order.getStatus() == status) {
-                // ★ BigDecimal 不可变：add 返回新对象，必须接收返回值！
-                //   写成 sum.add(...) 会静默失效（sum 还是 0），是极常见的低级错误
-                sum = sum.add(order.getAmount());
-            }
+     * 取消超时未支付的订单。
+     *
+     * ★ 为什么业务规则写在这里，而不是写在定时任务里？
+     *   定时任务只是"入口"（什么时候触发），规则必须放在 Service，
+     *   这样以后 Http 手动触发、CLI 批量跑都能复用同一份规则。
+     */
+    public int cancelExpiredOrders(int expireHours) {
+        if (expireHours <= 0) {
+            throw new IllegalArgumentException("超时小时数必须大于 0");
         }
-        return sum;
+
+        // ① 算出时间界限：现在减去 expireHours 小时
+        LocalDateTime deadline = LocalDateTime.now().minus(expireHours, ChronoUnit.HOURS);
+
+        // ② 调数据层
+        int cancelled = repository.cancelExpired(deadline);
+
+        // ③ 写日志（有取消才记 info，没有就 debug，避免日志噪音）
+        if (cancelled > 0) {
+            log.info("自动取消超时未支付订单: {} 笔, 界限={}", cancelled, deadline);
+        } else {
+            log.debug("没有超时的未支付订单");
+        }
+        return cancelled;
+    }
+
+    /**
+     * 一次算出三种状态的金额。
+     *
+     * ★ 聚合下推到 SQL：数据库只回三行 SUM，不用把订单全量读进 JVM。
+     * ★ 接口层要返回 unpaid / paid / cancelled 三个字段，
+     *   如果每个字段各查一次库就是三次 GROUP BY；这里只查一次。
+     */
+    public Map<String, BigDecimal> stats(String ownerId) {
+        Map<OrderStatus, BigDecimal> sums = repository.sumByStatus(ownerId);
+        return Map.of(
+                "unpaid", sums.getOrDefault(OrderStatus.UNPAID, BigDecimal.ZERO),
+                "paid", sums.getOrDefault(OrderStatus.PAID, BigDecimal.ZERO),
+                "cancelled", sums.getOrDefault(OrderStatus.CANCELLED, BigDecimal.ZERO));
     }
 }

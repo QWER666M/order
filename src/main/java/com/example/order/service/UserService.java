@@ -1,7 +1,11 @@
-package com.example.order;
+package com.example.order.service;
 
+import com.example.order.domain.Role;
+import com.example.order.domain.User;
 import com.example.order.dto.AuthResponse;
-
+import com.example.order.exception.LoginFailedException;
+import com.example.order.repository.UserRepository;
+import com.example.order.security.JwtService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;

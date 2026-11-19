@@ -1,4 +1,4 @@
-package com.example.order;
+package com.example.order.domain;
 
 /**
  * 用户实体。

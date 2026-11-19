@@ -1,17 +1,20 @@
 package com.example.order;
 
+import com.example.order.domain.Order;
+import com.example.order.domain.OrderItem;
+import com.example.order.domain.OrderStatus;
+import com.example.order.dto.PageResponse;
+import com.example.order.service.OrderService;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
-
-import com.example.order.dto.PageResponse;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -144,14 +147,17 @@ class OrderServiceTest {
     }
 
     @Test
-    void sumAmount_sumsByStatus() {
+    void stats_sumsByStatus() {
         service.createOrder("A001", money("10.10"));
         service.createOrder("A002", money("20.20"));
         service.createOrder("A003", money("0.70"));
         service.pay("A002");
 
-        assertAmount("20.20", service.sumAmount(OrderStatus.PAID));
-        assertAmount("10.80", service.sumAmount(OrderStatus.UNPAID));   // 10.10 + 0.70
+        Map<String, BigDecimal> stats = service.stats(null);
+
+        assertAmount("20.20", stats.get("paid"));
+        assertAmount("10.80", stats.get("unpaid"));   // 10.10 + 0.70
+        assertAmount("0", stats.get("cancelled"));    // 没有该状态的订单时为 0
     }
 
     // ================= 分页 =================

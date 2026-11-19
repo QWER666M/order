@@ -1,5 +1,6 @@
-package com.example.order;
+package com.example.order.security;
 
+import com.example.order.domain.Role;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;

@@ -1,25 +1,28 @@
-package com.example.order;
+package com.example.order.controller;
 
+import com.example.order.domain.Order;
+import com.example.order.domain.OrderItem;
 import com.example.order.dto.CreateOrderRequest;
 import com.example.order.dto.OrderDetailResponse;
+import com.example.order.dto.OrderItemResponse;
 import com.example.order.dto.OrderResponse;
 import com.example.order.dto.PageResponse;
-
+import com.example.order.security.AuthInterceptor;
+import com.example.order.service.OrderService;
+import java.math.BigDecimal;
+import java.util.List;
+import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestAttribute;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
-import com.example.order.dto.OrderItemResponse;
-import java.math.BigDecimal;
-import java.util.List;
-import java.util.Map;
 
 /**
  * 接口层（Controller）：把 HTTP 请求翻译成对 OrderService 的调用。
@@ -84,48 +87,25 @@ public class OrderController {
     @GetMapping("/{id}")
     public OrderDetailResponse getOne(@PathVariable String id,
                                       @RequestAttribute(name = AuthInterceptor.ATTR_USERNAME, required = false) String user) {
-        // ★ 别人的订单统一返回 404（而不是 403）：
-        //   403 等于告诉攻击者"这个订单号存在，只是你没权限"，可以被用来枚举订单。
-        if (!service.isOwnedBy(id, user)) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在：" + id);
-        }
-        Order order = service.findOrder(id);
-        if (order == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在：" + id);
-        }
+        Order order = requireOwned(id, user);
         // 明细只在这一层按需查询：列表接口不会为每条订单都查一次明细（避免 N+1）
         return OrderDetailResponse.from(order, service.findOrderItems(id));
     }
+
     @GetMapping("/{id}/items")
     public List<OrderItemResponse> items(@PathVariable String id,
                                          @RequestAttribute(name = AuthInterceptor.ATTR_USERNAME, required = false) String user) {
-       if (!service.isOwnedBy(id, user)) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在：" + id);
-        }
-        Order order = service.findOrder(id);
-         if (order == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在：" + id);
-        }
-        
-        
-        
+        requireOwned(id, user);
         return service.findOrderItems(id).stream()
                 .map(OrderItemResponse::from)
-                .toList();  
-     
+                .toList();
     }
 
-
-
-
-    
     /** POST /orders/{id}/pay —— 支付；不是自己的订单返回 404，状态冲突返回 409 */
     @PostMapping("/{id}/pay")
     public Map<String, Object> pay(@PathVariable String id,
                                    @RequestAttribute(name = AuthInterceptor.ATTR_USERNAME, required = false) String user) {
-        if (!service.isOwnedBy(id, user)) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在：" + id);
-        }
+        requireOwned(id, user);
         if (!service.pay(id)) {
             throw new ResponseStatusException(
                     HttpStatus.CONFLICT,
@@ -138,9 +118,7 @@ public class OrderController {
     @PostMapping("/{id}/cancel")
     public Map<String, Object> cancel(@PathVariable String id,
                                       @RequestAttribute(name = AuthInterceptor.ATTR_USERNAME, required = false) String user) {
-        if (!service.isOwnedBy(id, user)) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在：" + id);
-        }
+        requireOwned(id, user);
         if (!service.cancel(id)) {
             throw new ResponseStatusException(
                     HttpStatus.CONFLICT,
@@ -153,10 +131,23 @@ public class OrderController {
     @GetMapping("/stats")
     public Map<String, BigDecimal> stats(
             @RequestAttribute(name = AuthInterceptor.ATTR_USERNAME, required = false) String user) {
-        return Map.of(
-                "unpaid", service.sumAmount(OrderStatus.UNPAID, user),
-                "paid", service.sumAmount(OrderStatus.PAID, user),
-                "cancelled", service.sumAmount(OrderStatus.CANCELLED, user)
-        );
+        return service.stats(user);
+    }
+
+    /**
+     * 取订单并校验归属，四个接口共用一份判断。
+     *
+     * ★ 别人的订单统一返回 404（而不是 403）：
+     *   403 等于告诉攻击者"这个订单号存在，只是你没权限"，可以被用来枚举订单。
+     */
+    private Order requireOwned(String id, String user) {
+        if (!service.isOwnedBy(id, user)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在：" + id);
+        }
+        Order order = service.findOrder(id);
+        if (order == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在：" + id);
+        }
+        return order;
     }
 }

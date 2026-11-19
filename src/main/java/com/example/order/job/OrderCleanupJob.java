@@ -1,5 +1,6 @@
-package com.example.order;
+package com.example.order.job;
 
+import com.example.order.service.OrderService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -33,7 +34,7 @@ public class OrderCleanupJob {
     @Scheduled(cron = "${app.order.cleanup-cron:0 */10 * * * *}", zone = "Asia/Shanghai")
     public void cancelExpiredOrders() {
         log.debug("开始扫描超时未支付订单（{} 小时）", expireHours);
-        int cancelled = orderService.cancelExpiredOrders(expireHours);        // ← 填空
+        int cancelled = orderService.cancelExpiredOrders(expireHours);
         if (cancelled > 0) {
             log.info("定时任务：自动取消 {} 笔超时未支付订单", cancelled);
         }

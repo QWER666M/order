@@ -1,4 +1,4 @@
-package com.example.order;
+package com.example.order.exception;
 
 /**
  * 登录失败（用户名或密码错误）。

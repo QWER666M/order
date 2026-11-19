@@ -1,9 +1,8 @@
-package com.example.order;
+package com.example.order.repository;
 
-import java.util.List;
-
+import com.example.order.domain.User;
 import com.example.order.dto.AdminUserResponse;
-
+import java.util.List;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;

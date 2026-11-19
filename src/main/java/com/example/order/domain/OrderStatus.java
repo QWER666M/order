@@ -1,4 +1,4 @@
-package com.example.order;
+package com.example.order.domain;
 
 /**
  * 订单状态。用枚举表示，避免到处写 "未支付"/"已支付" 这样的字符串。

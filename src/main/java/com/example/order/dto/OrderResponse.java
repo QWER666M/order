@@ -1,9 +1,8 @@
 package com.example.order.dto;
 
+import com.example.order.domain.Order;
+import com.example.order.domain.OrderStatus;
 import java.math.BigDecimal;
-
-import com.example.order.Order;
-import com.example.order.OrderStatus;
 
 /**
  * 订单的【对外响应结构】（DTO = Data Transfer Object，数据传输对象）。

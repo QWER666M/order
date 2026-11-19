@@ -1,4 +1,4 @@
-package com.example.order;
+package com.example.order.domain;
 
 /**
  * 角色（权限模型的最小单位）。

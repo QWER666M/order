@@ -1,7 +1,8 @@
 package com.example.order;
-import org.springframework.scheduling.annotation.EnableScheduling;
+
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * 程序入口（唯一的入口）。

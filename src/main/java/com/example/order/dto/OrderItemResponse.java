@@ -1,8 +1,7 @@
 package com.example.order.dto;
 
+import com.example.order.domain.OrderItem;
 import java.math.BigDecimal;
-
-import com.example.order.OrderItem;
 
 /**
  * 明细的出参结构。

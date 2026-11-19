@@ -1,9 +1,9 @@
-package com.example.order;
+package com.example.order.controller;
 
 import com.example.order.dto.AuthResponse;
 import com.example.order.dto.LoginRequest;
 import com.example.order.dto.RegisterRequest;
-
+import com.example.order.service.UserService;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;

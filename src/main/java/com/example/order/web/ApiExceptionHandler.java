@@ -1,7 +1,7 @@
-package com.example.order;
+package com.example.order.web;
 
+import com.example.order.exception.LoginFailedException;
 import java.util.Map;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;

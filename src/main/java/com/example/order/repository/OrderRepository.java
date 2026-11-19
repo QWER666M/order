@@ -1,9 +1,15 @@
-package com.example.order;
+package com.example.order.repository;
 
+import com.example.order.domain.Order;
+import com.example.order.domain.OrderItem;
+import com.example.order.domain.OrderStatus;
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.EnumMap;
 import java.util.List;
-
+import java.util.Map;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
@@ -86,16 +92,36 @@ public class OrderRepository {
         return found.isEmpty() ? null : found.get(0);
     }
 
-    /** 取全部订单，按插入顺序（seq 是自增主键，等价于原来 LinkedHashMap 的顺序） */
-    public List<Order> listAll() {
-        return jdbc.query("SELECT id, amount, status, owner_id FROM orders ORDER BY seq", TO_ORDER);
-    }
+    /**
+     * 按状态汇总金额：一次 GROUP BY 出结果，返回的行数恒为「状态种类数」（最多 3 行）。
+     *
+     * ★ 为什么不把订单全查出来、在 Java 里 for 循环累加？
+     *   那样需要把整张表通过网络读进 JVM，再为每行创建一个对象 ——
+     *   订单到百万级时，内存和 GC 都会被拖垮，而这只是要一个总数。
+     *   聚合是数据库最擅长的事，让它只回 3 行。
+     *
+     * ownerId 为 null 表示统计全表（管理员视角）。
+     * 没有任何订单的状态补 0，保证接口三个字段永远存在。
+     */
+    public Map<OrderStatus, BigDecimal> sumByStatus(String ownerId) {
+        Map<OrderStatus, BigDecimal> sums = new EnumMap<>(OrderStatus.class);
+        for (OrderStatus status : OrderStatus.values()) {
+            sums.put(status, BigDecimal.ZERO);
+        }
 
-    /** 取某个用户的全部订单（统计用） */
-    public List<Order> listAll(String ownerId) {
-        return jdbc.query(
-                "SELECT id, amount, status, owner_id FROM orders WHERE owner_id = ? ORDER BY seq",
-                TO_ORDER, ownerId);
+        String sql = "SELECT status, SUM(amount) AS total FROM orders"
+                + (ownerId == null ? "" : " WHERE owner_id = ?")
+                + " GROUP BY status";
+
+        RowCallbackHandler collector = rs -> sums.put(
+                OrderStatus.valueOf(rs.getString("status")),
+                rs.getBigDecimal("total"));
+        if (ownerId == null) {
+            jdbc.query(sql, collector);
+        } else {
+            jdbc.query(sql, collector, ownerId);
+        }
+        return sums;
     }
 
     /**

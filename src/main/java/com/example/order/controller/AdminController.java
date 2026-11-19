@@ -1,14 +1,17 @@
-package com.example.order;
+package com.example.order.controller;
 
-import java.math.BigDecimal;
-import java.util.List;
-import java.util.Map;
-
+import com.example.order.domain.Order;
+import com.example.order.domain.Role;
 import com.example.order.dto.AdminUserResponse;
 import com.example.order.dto.OrderDetailResponse;
 import com.example.order.dto.OrderResponse;
 import com.example.order.dto.PageResponse;
-
+import com.example.order.repository.UserRepository;
+import com.example.order.security.RequireRole;
+import com.example.order.service.OrderService;
+import java.math.BigDecimal;
+import java.util.List;
+import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -103,10 +106,6 @@ public class AdminController {
     @GetMapping("/stats")
     public Map<String, BigDecimal> stats() {
         // 传 null 表示不按归属人过滤 —— 复用同一段统计逻辑，不复制代码
-        return Map.of(
-                "unpaid", orderService.sumAmount(OrderStatus.UNPAID, null),
-                "paid", orderService.sumAmount(OrderStatus.PAID, null),
-                "cancelled", orderService.sumAmount(OrderStatus.CANCELLED, null)
-        );
+        return orderService.stats(null);
     }
 }

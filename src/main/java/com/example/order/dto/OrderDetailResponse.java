@@ -1,11 +1,10 @@
 package com.example.order.dto;
 
+import com.example.order.domain.Order;
+import com.example.order.domain.OrderItem;
+import com.example.order.domain.OrderStatus;
 import java.math.BigDecimal;
 import java.util.List;
-
-import com.example.order.Order;
-import com.example.order.OrderItem;
-import com.example.order.OrderStatus;
 
 /**
  * 订单【详情】的出参结构：比列表多一个 items 字段。
